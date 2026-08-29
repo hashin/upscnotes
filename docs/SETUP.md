@@ -106,12 +106,12 @@ The GitHub Action redeploys automatically.
 ## Operating notes
 
 - **Free-tier headroom:** GitHub Pages soft-limits static bandwidth at ~100 GB/mo; the
-  Worker free tier is 100k req/day and D1 is 100k writes/day. The read path (profile views)
-  is served from R2 edge cache + Google's CDN, so the Worker is hit only on username
-  claims/renames. If you outgrow GitHub Pages, move the static host to Cloudflare Pages —
-  same repo, `public/_redirects` is already there.
+  Worker free tier is 100k req/day and D1 is 5M reads / 100k writes per day. Note bodies are
+  fetched straight from Google's CDN, and profile lookups are edge-cached, so the Worker is
+  hit mainly on username claims/renames and cache-miss lookups. If you outgrow GitHub Pages,
+  move the static host to Cloudflare Pages — same repo, `public/_redirects` is already there.
 - **Backups vs publishing:** every synced note is a private `.md` in the student's Drive.
   Publishing flips that one file (+ its images) to anyone-with-link and lists it in the
-  public `profile.json`. Un-publishing reverts the sharing.
+  public `profile.json` in their Drive. Un-publishing reverts the sharing.
 - **Abuse:** `worker/src/index.ts` rate-limits claims per Google account; add Cloudflare
   Turnstile in front of `/claim` if you see scripted signups.
