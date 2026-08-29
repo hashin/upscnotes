@@ -48,7 +48,7 @@ templates, search and export. Sign-in, Drive sync and publishing need the setup 
 
 ## Deploy
 
-See [docs/SETUP.md](docs/SETUP.md) — ~20 minutes: Google Cloud OAuth, Cloudflare Pages +
+See [docs/SETUP.md](docs/SETUP.md): add one Spaceship DNS record to go live; Google OAuth + a Cloudflare Worker (optional) enable sign-in and publishing.
 D1 + R2, DNS, and pasting the public IDs into `src/config.ts`.
 
 ## License
