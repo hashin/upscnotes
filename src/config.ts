@@ -17,10 +17,15 @@ export const config = {
    */
   GOOGLE_API_KEY: '' as string,
 
-  /** Base URL of the Cloudflare Pages Function API. Same origin in production; set for local dev if needed. */
-  API_BASE: '' as string, // e.g. 'https://upscnotes.hashin.me'  (empty = same origin)
+  /**
+   * Base URL of the username-registry API (Cloudflare Worker). Empty = same origin.
+   * The static site is on GitHub Pages, so this points at the deployed Worker, e.g.
+   * 'https://upscnotes-api.hashin.workers.dev'. Leave empty until the Worker exists —
+   * sign-in and publishing stay disabled and the rest of the app works.
+   */
+  API_BASE: '' as string,
 
-  /** Public base URL of the R2 registry bucket that maps username -> profile pointer. */
+  /** Public base URL of the R2 bucket that serves username -> profile pointer objects. */
   REGISTRY_BASE: 'https://registry.upscnotes.hashin.me' as string,
 
   /** Canonical site URL, used for share links and SEO tags. */

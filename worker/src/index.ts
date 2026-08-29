@@ -1,13 +1,14 @@
 /**
- * Cloudflare Pages Function — the ONLY server-side code in this project.
+ * Cloudflare Worker — the ONLY server-side code in this project.
  *
- * It does two things and nothing else:
+ * The app is hosted as a static site on GitHub Pages; this Worker is deployed separately
+ * (e.g. upscnotes-api.<account>.workers.dev) and does two things and nothing else:
  *   1. verify a Google ID token
  *   2. keep the `username -> public profile pointer` registry unique (D1) and publish a
  *      static, edge-cacheable pointer object (R2)
  *
- * Notes themselves never pass through here — they live in each student's Google Drive and
- * are read by the browser directly from Google's CDN.
+ * Notes never pass through here — they live in each student's Google Drive and are read by
+ * the browser directly from Google's CDN.
  */
 
 export interface Env {
@@ -23,35 +24,34 @@ const RESERVED = new Set([
   'signup', 'static', 'support', 'terms', 'u', 'user', 'users', 'www', 'hashin',
 ]);
 
+const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+  'access-control-allow-headers': 'authorization,content-type',
+  'access-control-max-age': '86400',
+};
+
 const json = (data: unknown, status = 200, extra: HeadersInit = {}) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', ...extra },
+    headers: { 'content-type': 'application/json; charset=utf-8', ...CORS, ...extra },
   });
 
-export const onRequestOptions: PagesFunction = async () =>
-  new Response(null, {
-    headers: {
-      'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-      'access-control-allow-headers': 'authorization,content-type',
-      'access-control-max-age': '86400',
-    },
-  });
-
-export const onRequest: PagesFunction<Env> = async (ctx) => {
-  const url = new URL(ctx.request.url);
-  const path = url.pathname.replace(/^\/api/, '');
-  try {
-    if (ctx.request.method === 'GET' && path === '/check') return check(ctx.env, url);
-    if (ctx.request.method === 'POST' && path === '/claim') return claim(ctx);
-    if (ctx.request.method === 'POST' && path === '/profile') return updateProfile(ctx);
-    if (ctx.request.method === 'DELETE' && path === '/account') return deleteAccount(ctx);
-    return json({ error: 'not found' }, 404);
-  } catch (e) {
-    if (e instanceof Response) return e;
-    return json({ error: (e as Error).message ?? 'server error' }, 500);
-  }
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    const path = new URL(request.url).pathname.replace(/^\/api/, '').replace(/\/$/, '') || '/';
+    try {
+      if (request.method === 'GET' && (path === '/check' || path === '/')) return check(env, new URL(request.url));
+      if (request.method === 'POST' && path === '/claim') return claim(request, env);
+      if (request.method === 'POST' && path === '/profile') return updateProfile(request, env);
+      if (request.method === 'DELETE' && path === '/account') return deleteAccount(request, env);
+      return json({ error: 'not found' }, 404);
+    } catch (e) {
+      if (e instanceof Response) return e;
+      return json({ error: (e as Error).message ?? 'server error' }, 500);
+    }
+  },
 };
 
 /* ---------------- handlers ---------------- */
@@ -67,15 +67,10 @@ async function check(env: Env, url: URL): Promise<Response> {
   const bad = validateName(name);
   if (bad) return json({ available: false, reason: bad });
   const row = await env.DB.prepare('SELECT 1 FROM users WHERE username = ?').bind(name).first();
-  return json(
-    { available: !row, reason: row ? 'taken' : undefined },
-    200,
-    { 'cache-control': 'public, max-age=20' },
-  );
+  return json({ available: !row, reason: row ? 'taken' : undefined }, 200, { 'cache-control': 'public, max-age=20' });
 }
 
-async function claim(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Response> {
-  const { env, request } = ctx;
+async function claim(request: Request, env: Env): Promise<Response> {
   const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
   const body = await request.json<{ username?: string; profileUrl?: string; profileFileId?: string }>();
   const name = (body.username ?? '').toLowerCase().trim();
@@ -103,7 +98,6 @@ async function claim(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Response> 
     ).bind(name, claims.sub, body.profileUrl, body.profileFileId, now),
   ]);
 
-  // Free the old name's pointer object if the user renamed.
   if (existing && existing.username !== name) {
     await env.DB.prepare('DELETE FROM profiles WHERE username = ?').bind(existing.username).run();
     await env.REGISTRY.delete(registryKey(existing.username)).catch(() => {});
@@ -113,8 +107,7 @@ async function claim(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Response> 
   return json({ ok: true, username: name });
 }
 
-async function updateProfile(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Response> {
-  const { env, request } = ctx;
+async function updateProfile(request: Request, env: Env): Promise<Response> {
   const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
   const body = await request.json<{ profileUrl?: string; profileFileId?: string }>();
   const row = await env.DB.prepare('SELECT username FROM users WHERE sub = ?').bind(claims.sub).first<{ username: string }>();
@@ -128,8 +121,7 @@ async function updateProfile(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Re
   return json({ ok: true });
 }
 
-async function deleteAccount(ctx: Parameters<PagesFunction<Env>>[0]): Promise<Response> {
-  const { env, request } = ctx;
+async function deleteAccount(request: Request, env: Env): Promise<Response> {
   const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
   const row = await env.DB.prepare('SELECT username FROM users WHERE sub = ?').bind(claims.sub).first<{ username: string }>();
   if (row) {
@@ -153,10 +145,7 @@ function registryKey(username: string): string {
 async function writePointer(env: Env, username: string, sub: string, profileUrl: string, profileFileId: string, updatedAt: number) {
   const payload = JSON.stringify({ username, profileUrl, profileFileId, updatedAt });
   await env.REGISTRY.put(registryKey(username), payload, {
-    httpMetadata: {
-      contentType: 'application/json; charset=utf-8',
-      cacheControl: 'public, max-age=300, s-maxage=3600',
-    },
+    httpMetadata: { contentType: 'application/json; charset=utf-8', cacheControl: 'public, max-age=300, s-maxage=3600' },
     customMetadata: { sub },
   });
 }
@@ -166,18 +155,17 @@ async function writePointer(env: Env, username: string, sub: string, profileUrl:
 interface GoogleClaims {
   sub: string;
   email?: string;
-  email_verified?: boolean;
   aud: string;
   iss: string;
   exp: number;
 }
 
-let jwksCache: { keys: any[]; fetchedAt: number } | null = null;
+let jwksCache: { keys: JsonWebKey[]; fetchedAt: number } | null = null;
 
 async function getJwks(): Promise<any[]> {
-  if (jwksCache && Date.now() - jwksCache.fetchedAt < 3600_000) return jwksCache.keys;
+  if (jwksCache && Date.now() - jwksCache.fetchedAt < 3_600_000) return jwksCache.keys;
   const res = await fetch('https://www.googleapis.com/oauth2/v3/certs', { cf: { cacheTtl: 3600, cacheEverything: true } });
-  const data = await res.json<{ keys: any[] }>();
+  const data = (await res.json()) as { keys: JsonWebKey[] };
   jwksCache = { keys: data.keys, fetchedAt: Date.now() };
   return data.keys;
 }
@@ -192,6 +180,7 @@ function b64urlToBytes(s: string): Uint8Array {
 }
 
 async function verifyGoogleToken(request: Request, clientId: string): Promise<GoogleClaims> {
+  if (!clientId) throw unauthorized('server missing GOOGLE_CLIENT_ID');
   const auth = request.headers.get('authorization') ?? '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token) throw unauthorized('missing token');
@@ -205,39 +194,22 @@ async function verifyGoogleToken(request: Request, clientId: string): Promise<Go
   if (payload.aud !== clientId) throw unauthorized('bad audience');
   if (payload.exp * 1000 < Date.now()) throw unauthorized('token expired');
 
-  const jwk = (await getJwks()).find((k) => k.kid === header.kid);
+  const jwk = (await getJwks()).find((k) => (k as any).kid === header.kid);
   if (!jwk) throw unauthorized('unknown key');
 
-  const key = await crypto.subtle.importKey(
-    'jwk',
-    jwk,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
-  const ok = await crypto.subtle.verify(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    b64urlToBytes(s),
-    new TextEncoder().encode(`${h}.${p}`),
-  );
+  const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+  const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
   if (!ok) throw unauthorized('bad signature');
   return payload;
 }
 
-function unauthorized(msg = 'unauthorized'): Error {
+function errResponse(msg: string, status: number): Error {
   return new Response(JSON.stringify({ error: msg }), {
-    status: 401,
-    headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' },
+    status,
+    headers: { 'content-type': 'application/json', ...CORS },
   }) as unknown as Error;
 }
-
-function rateLimitError(): Error {
-  return new Response(JSON.stringify({ error: 'rate limited, try later' }), {
-    status: 429,
-    headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' },
-  }) as unknown as Error;
-}
+const unauthorized = (msg = 'unauthorized') => errResponse(msg, 401);
 
 /* ---------------- rate limiting (D1) ---------------- */
 
@@ -250,5 +222,5 @@ async function rateLimit(env: Env, key: string, max: number, windowSec: number):
   await env.DB.prepare(
     'INSERT INTO rate_limits (id, n, expires_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET n = ?2',
   ).bind(id, n, (bucket + 1) * windowSec).run();
-  if (n > max) throw rateLimitError();
+  if (n > max) throw errResponse('rate limited, try later', 429);
 }

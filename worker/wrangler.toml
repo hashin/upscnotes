@@ -1,0 +1,21 @@
+# Standalone Cloudflare Worker for the username registry.
+# Deploy:  cd worker && npx wrangler deploy
+# The static site lives on GitHub Pages; this is the only server component.
+
+name = "upscnotes-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "upscnotes"
+database_id = "PASTE_D1_DATABASE_ID"   # from: npx wrangler d1 create upscnotes
+
+[[r2_buckets]]
+binding = "REGISTRY"
+bucket_name = "upscnotes-registry"     # from: npx wrangler r2 bucket create upscnotes-registry
+
+# Set the OAuth client id (not secret) as a var:
+#   npx wrangler secret put GOOGLE_CLIENT_ID     (or add under [vars] below)
+[vars]
+GOOGLE_CLIENT_ID = ""
