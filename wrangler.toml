@@ -1,0 +1,23 @@
+# Cloudflare Pages configuration.
+# The static site is built by `npm run build` -> ./dist
+# The function in ./functions is deployed automatically alongside it.
+
+name = "upscnotes"
+compatibility_date = "2024-11-01"
+pages_build_output_dir = "dist"
+
+# --- bindings (create these once, then `wrangler pages deploy` or connect the Git repo) ---
+
+[[d1_databases]]
+binding = "DB"
+database_name = "upscnotes"
+database_id = "PASTE_D1_DATABASE_ID"   # from: npx wrangler d1 create upscnotes
+
+[[r2_buckets]]
+binding = "REGISTRY"
+bucket_name = "upscnotes-registry"     # from: npx wrangler r2 bucket create upscnotes-registry
+
+# GOOGLE_CLIENT_ID is set as a plaintext env var in the Pages dashboard
+# (Settings -> Environment variables) OR here for local dev:
+[vars]
+GOOGLE_CLIENT_ID = ""

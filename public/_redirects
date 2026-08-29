@@ -1,0 +1,4 @@
+# SPA fallback: every path that is not a real file or an /api/* route renders the app
+# shell, which then client-routes /<username> and /<username>/<slug> public pages.
+/api/*  /api/:splat  200
+/*      /index.html  200

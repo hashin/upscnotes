@@ -1,0 +1,12 @@
+# UPSC Notes
+
+> Free, offline-first markdown notes app for UPSC Civil Services preparation.
+> Notes are stored in the browser (IndexedDB) and backed up to each student's own
+> Google Drive. Students can publish selected notes at upscnotes.hashin.me/<username>.
+
+Hosting: Cloudflare Pages (static) + one Pages Function + D1 + R2.
+The function only verifies Google identity and keeps the username registry unique.
+Note content never touches the server — the browser reads/writes Google Drive directly.
+
+- Source: https://github.com/hashin/upscnotes
+- Setup: /docs/SETUP.md in the repo
