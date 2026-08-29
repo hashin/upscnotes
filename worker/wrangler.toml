@@ -11,11 +11,8 @@ binding = "DB"
 database_name = "upscnotes"
 database_id = "PASTE_D1_DATABASE_ID"   # from: npx wrangler d1 create upscnotes
 
-[[r2_buckets]]
-binding = "REGISTRY"
-bucket_name = "upscnotes-registry"     # from: npx wrangler r2 bucket create upscnotes-registry
-
-# Set the OAuth client id (not secret) as a var:
-#   npx wrangler secret put GOOGLE_CLIENT_ID     (or add under [vars] below)
-[vars]
-GOOGLE_CLIENT_ID = ""
+# GOOGLE_CLIENT_ID (the OAuth Web client id — public, not a secret) is read from env.
+# Set it with:  npx wrangler secret put GOOGLE_CLIENT_ID
+# or uncomment and inline it here:
+# [vars]
+# GOOGLE_CLIENT_ID = "xxxx.apps.googleusercontent.com"

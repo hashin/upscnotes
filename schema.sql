@@ -1,7 +1,8 @@
 -- Cloudflare D1 schema. Run once:
---   npx wrangler d1 execute upscnotes --file=schema.sql --remote
+--   npx wrangler d1 execute upscnotes --remote --file=schema.sql
 --
--- This holds ONLY the username registry. No note content is ever stored here.
+-- This holds ONLY the username registry (username -> public profile pointer).
+-- No note content is ever stored here — notes live in each student's Google Drive.
 
 CREATE TABLE IF NOT EXISTS users (
   sub        TEXT PRIMARY KEY,          -- Google account subject id

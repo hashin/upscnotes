@@ -18,15 +18,13 @@ export const config = {
   GOOGLE_API_KEY: '' as string,
 
   /**
-   * Base URL of the username-registry API (Cloudflare Worker). Empty = same origin.
-   * The static site is on GitHub Pages, so this points at the deployed Worker, e.g.
-   * 'https://upscnotes-api.hashin.workers.dev'. Leave empty until the Worker exists —
-   * sign-in and publishing stay disabled and the rest of the app works.
+   * Base URL of the registry API (Cloudflare Worker). The static site is on GitHub Pages,
+   * so this points at the deployed Worker, e.g. 'https://upscnotes-api.<account>.workers.dev'.
+   * It handles username claim/check, Google-token verification, and public username->profile
+   * lookups (`GET /u/<name>`, edge-cached). Leave empty until the Worker exists — sign-in and
+   * publishing stay disabled and the rest of the app works.
    */
   API_BASE: '' as string,
-
-  /** Public base URL of the R2 bucket that serves username -> profile pointer objects. */
-  REGISTRY_BASE: 'https://registry.upscnotes.hashin.me' as string,
 
   /** Canonical site URL, used for share links and SEO tags. */
   SITE_URL: 'https://upscnotes.hashin.me' as string,

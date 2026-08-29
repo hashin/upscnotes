@@ -13,7 +13,6 @@
 
 export interface Env {
   DB: D1Database;
-  REGISTRY: R2Bucket;
   GOOGLE_CLIENT_ID: string;
 }
 
@@ -38,11 +37,14 @@ const json = (data: unknown, status = 200, extra: HeadersInit = {}) =>
   });
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
-    const path = new URL(request.url).pathname.replace(/^\/api/, '').replace(/\/$/, '') || '/';
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/^\/api/, '').replace(/\/$/, '') || '/';
     try {
-      if (request.method === 'GET' && (path === '/check' || path === '/')) return check(env, new URL(request.url));
+      if (request.method === 'GET' && path === '/') return json({ ok: true, service: 'upscnotes-api' });
+      if (request.method === 'GET' && path === '/check') return check(env, url);
+      if (request.method === 'GET' && path.startsWith('/u/')) return resolveProfile(env, ctx, request, decodeURIComponent(path.slice(3)));
       if (request.method === 'POST' && path === '/claim') return claim(request, env);
       if (request.method === 'POST' && path === '/profile') return updateProfile(request, env);
       if (request.method === 'DELETE' && path === '/account') return deleteAccount(request, env);
@@ -53,6 +55,34 @@ export default {
     }
   },
 };
+
+/**
+ * Public: username -> profile pointer. Edge-cached so repeat profile views cost ~nothing.
+ * A cache hit still counts as one Worker request but does zero DB work; a miss does a
+ * single indexed D1 read.
+ */
+async function resolveProfile(env: Env, ctx: ExecutionContext, request: Request, username: string): Promise<Response> {
+  const name = username.toLowerCase().replace(/\.json$/, '');
+  if (!USERNAME_RE.test(name)) return json({ error: 'invalid username' }, 404);
+
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(request.url).origin + '/u/' + name, request);
+  const hit = await cache.match(cacheKey);
+  if (hit) return hit;
+
+  const row = await env.DB.prepare('SELECT profile_url, updated_at FROM profiles WHERE username = ?')
+    .bind(name)
+    .first<{ profile_url: string; updated_at: number }>();
+  if (!row) return json({ error: 'not found' }, 404, { 'cache-control': 'public, max-age=30' });
+
+  const res = json(
+    { username: name, profileUrl: row.profile_url, updatedAt: row.updated_at },
+    200,
+    { 'cache-control': 'public, max-age=300, s-maxage=300' },
+  );
+  ctx.waitUntil(cache.put(cacheKey, res.clone()));
+  return res;
+}
 
 /* ---------------- handlers ---------------- */
 
@@ -100,10 +130,8 @@ async function claim(request: Request, env: Env): Promise<Response> {
 
   if (existing && existing.username !== name) {
     await env.DB.prepare('DELETE FROM profiles WHERE username = ?').bind(existing.username).run();
-    await env.REGISTRY.delete(registryKey(existing.username)).catch(() => {});
   }
 
-  await writePointer(env, name, claims.sub, body.profileUrl, body.profileFileId, now);
   return json({ ok: true, username: name });
 }
 
@@ -117,7 +145,6 @@ async function updateProfile(request: Request, env: Env): Promise<Response> {
   await env.DB.prepare('UPDATE profiles SET profile_url = ?, profile_file_id = ?, updated_at = ? WHERE username = ?')
     .bind(body.profileUrl, body.profileFileId, now, row.username)
     .run();
-  await writePointer(env, row.username, claims.sub, body.profileUrl, body.profileFileId, now);
   return json({ ok: true });
 }
 
@@ -129,25 +156,9 @@ async function deleteAccount(request: Request, env: Env): Promise<Response> {
       env.DB.prepare('DELETE FROM profiles WHERE sub = ?').bind(claims.sub),
       env.DB.prepare('DELETE FROM users WHERE sub = ?').bind(claims.sub),
     ]);
-    await env.REGISTRY.delete(registryKey(row.username)).catch(() => {});
+    void row;
   }
   return json({ ok: true });
-}
-
-/* ---------------- registry object (R2) ---------------- */
-
-function registryKey(username: string): string {
-  const u = username.toLowerCase();
-  const prefix = u.slice(0, 2).padEnd(2, '_').replace(/[^a-z0-9]/g, '_');
-  return `u/${prefix}/${u}.json`;
-}
-
-async function writePointer(env: Env, username: string, sub: string, profileUrl: string, profileFileId: string, updatedAt: number) {
-  const payload = JSON.stringify({ username, profileUrl, profileFileId, updatedAt });
-  await env.REGISTRY.put(registryKey(username), payload, {
-    httpMetadata: { contentType: 'application/json; charset=utf-8', cacheControl: 'public, max-age=300, s-maxage=3600' },
-    customMetadata: { sub },
-  });
 }
 
 /* ---------------- Google ID token verification ---------------- */

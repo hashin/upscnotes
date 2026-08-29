@@ -51,7 +51,11 @@ The repo already has `public/CNAME` = `upscnotes.hashin.me`, so nothing else is 
 
 ---
 
-## 3. Cloudflare Worker + D1 + R2  (optional — the username registry)
+## 3. Cloudflare Worker + D1  (optional — the username registry)
+
+No R2, no extra DNS. The Worker runs on its own `*.workers.dev` domain and serves both the
+username claim/check and the public `username -> profile` lookup (`GET /u/<name>`,
+edge-cached; a cache hit does zero DB work, a miss is one indexed D1 read).
 
 ```bash
 npm i -g wrangler
@@ -59,27 +63,13 @@ wrangler login
 
 wrangler d1 create upscnotes
 #   -> paste database_id into worker/wrangler.toml
-wrangler d1 execute upscnotes --remote --file=schema.sql
-
-wrangler r2 bucket create upscnotes-registry
 
 cd worker
-#   set the OAuth client id (not a secret, but this keeps it out of git):
+wrangler d1 execute upscnotes --remote --file=../schema.sql
 wrangler secret put GOOGLE_CLIENT_ID       # paste the Client ID from step 2.4
 wrangler deploy
 #   -> note the deployed URL, e.g. https://upscnotes-api.<account>.workers.dev
 ```
-
-Make the R2 bucket public on a subdomain: **Cloudflare dashboard → R2 →
-upscnotes-registry → Settings → Public access → Connect custom domain** →
-`registry.upscnotes.hashin.me`. Cloudflare will show a CNAME target — add it at Spaceship:
-
-| Type  | Host / Name | Value / Target                    |
-|-------|-------------|-----------------------------------|
-| CNAME | `registry`  | *(target Cloudflare shows)*        |
-
-(This needs hashin.me to be reachable by Cloudflare for the cert — a Spaceship CNAME to an
-`*.r2.dev` style hostname works; follow the dashboard's exact instructions.)
 
 ---
 
@@ -91,7 +81,6 @@ Edit `src/config.ts`:
 GOOGLE_CLIENT_ID: '….apps.googleusercontent.com',
 GOOGLE_API_KEY:   'AIza…',
 API_BASE:         'https://upscnotes-api.<account>.workers.dev',
-REGISTRY_BASE:    'https://registry.upscnotes.hashin.me',
 SITE_URL:         'https://upscnotes.hashin.me',
 ```
 
@@ -111,7 +100,7 @@ The GitHub Action redeploys automatically.
 | `/about` and `/<name>` deep links load on refresh | ✅ SPA 404 fallback |
 | Account → Sign in → Connect Drive | `UPSC Notes/` folder of `.md` files appears in Drive |
 | Claim username `hashin`, mark a note Public, open `/hashin` in incognito | note renders logged-out |
-| DevTools Network on `/hashin` repeat load | pointer from `registry.…`, body from `googleapis.com`, **no `/api/*`** |
+| DevTools Network on `/hashin` repeat load | `GET /u/<name>` + body from `googleapis.com`; repeat views are edge-cached |
 | `wrangler tail` (in `worker/`) during a claim | one `POST /claim`; `wrangler d1 execute upscnotes --remote --command "SELECT * FROM users"` shows the row |
 
 ## Operating notes
