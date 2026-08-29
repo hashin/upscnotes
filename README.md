@@ -48,8 +48,10 @@ templates, search and export. Sign-in, Drive sync and publishing need the setup 
 
 ## Deploy
 
-See [docs/SETUP.md](docs/SETUP.md): add one Spaceship DNS record to go live; Google OAuth + a Cloudflare Worker (optional) enable sign-in and publishing.
-D1 + R2, DNS, and pasting the public IDs into `src/config.ts`.
+The static app auto-deploys to GitHub Pages on every push to `master`
+(`.github/workflows/deploy.yml`). See [docs/SETUP.md](docs/SETUP.md): add one Spaceship
+DNS record to go live; Google OAuth + a Cloudflare Worker (both optional) enable sign-in,
+Drive backup and publishing.
 
 ## License
 
