@@ -48,6 +48,7 @@ export default {
       if (request.method === 'GET' && path === '/') return json({ ok: true, service: 'upscnotes-api' });
       if (request.method === 'POST' && path === '/oauth/exchange') return await oauthExchange(request, env);
       if (request.method === 'POST' && path === '/oauth/refresh') return await oauthRefresh(request, env);
+      if (request.method === 'GET' && path === '/me') return await me(request, env);
       if (request.method === 'GET' && path === '/check') return await check(env, url);
       if (request.method === 'GET' && path.startsWith('/u/')) return await resolveProfile(env, ctx, request, decodeURIComponent(path.slice(3)));
       if (request.method === 'POST' && path === '/claim') return await claim(request, env);
@@ -156,6 +157,23 @@ function validateName(name: string): string | null {
   if (!USERNAME_RE.test(name)) return 'invalid username format';
   if (RESERVED.has(name)) return 'reserved username';
   return null;
+}
+
+/** The caller's own registry record — so a new browser/device recovers its username. */
+async function me(request: Request, env: Env): Promise<Response> {
+  const caller = await verifyCaller(request, env);
+  const row = await env.DB.prepare(
+    `SELECT u.username AS username, p.profile_url AS profileUrl, p.profile_file_id AS profileFileId
+       FROM users u LEFT JOIN profiles p ON p.username = u.username
+      WHERE u.sub = ?`,
+  ).bind(caller.sub).first<{ username: string; profileUrl: string | null; profileFileId: string | null }>();
+  return json(
+    row
+      ? { username: row.username, profileUrl: row.profileUrl, profileFileId: row.profileFileId }
+      : { username: null },
+    200,
+    { 'cache-control': 'no-store' },
+  );
 }
 
 async function check(env: Env, url: URL): Promise<Response> {

@@ -7,6 +7,7 @@ import { bus, toast } from '../util/misc';
 import {
   createFile,
   ensureRootFolder,
+  findAppFile,
   makePrivate,
   makePublic,
   publicContentUrl,
@@ -88,9 +89,20 @@ async function driveRoot(): Promise<string> {
 }
 
 async function ensureProfileFile(): Promise<string> {
-  const existing = await metaGet<string>('profileFileId', getUser()?.profileFileId ?? '');
-  if (existing) return existing;
+  const known = await metaGet<string>('profileFileId', getUser()?.profileFileId ?? '');
+  if (known) return known;
   await getDriveToken();
+
+  // A profile.json created on another device is visible here (drive.file is per app+user),
+  // so adopt it rather than making a duplicate.
+  const found = await findAppFile('upscnotes-profile', '1');
+  if (found) {
+    const url = await makePublic(found);
+    await metaSet('profileFileId', found);
+    await updateStoredUser({ profileFileId: found, profileFileUrl: url });
+    return found;
+  }
+
   const root = await driveRoot();
   const file = await createFile(root, 'profile.json', JSON.stringify(emptyProfile(), null, 2), {
     'upscnotes-profile': '1',
@@ -186,9 +198,39 @@ export async function updateProfileMeta(patch: { displayName?: string; bio?: str
   await rebuildAndUploadProfile();
 }
 
-/** Wire background profile refresh when published notes change. */
+/**
+ * Ask the Worker what username this Google account already owns and adopt it locally.
+ * This is what makes a second browser / device point at the same public page: the
+ * username registry lives in D1 keyed by the Google account, not in this browser.
+ */
+let lastIdentityPull = 0;
+export async function pullIdentity(force = false): Promise<void> {
+  const user = getUser();
+  if (!user) return;
+  if (!force && Date.now() - lastIdentityPull < 30_000) return;
+  lastIdentityPull = Date.now();
+  try {
+    const token = await getDriveToken(true);
+    const res = await fetch(apiUrl('/me'), { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return;
+    const data = (await res.json()) as { username?: string | null; profileFileId?: string | null; profileUrl?: string | null };
+    if (data.username && data.username !== user.username) {
+      await updateStoredUser({
+        username: data.username,
+        profileFileId: data.profileFileId ?? undefined,
+        profileFileUrl: data.profileUrl ?? undefined,
+      });
+      if (data.profileFileId) await metaSet('profileFileId', data.profileFileId);
+    }
+  } catch {
+    /* offline / not connected — try again next time */
+  }
+}
+
+/** Wire background profile refresh + identity recovery. */
 export function watchPublishing(): void {
   bus.on('note-saved', (n: Note) => {
     if (n.published) rebuildAndUploadProfileSoon();
   });
+  bus.on('drive-connected', () => void pullIdentity());
 }

@@ -204,3 +204,12 @@ export function publicContentUrl(fileId: string): string {
 export async function about(): Promise<{ user: { emailAddress: string } }> {
   return (await driveFetch(`${API}/about?fields=user(emailAddress)`)).json();
 }
+
+/** First non-trashed file this app created that carries the given appProperty. */
+export async function findAppFile(key: string, value: string): Promise<string | null> {
+  const q = encodeURIComponent(
+    `trashed=false and appProperties has { key='${key}' and value='${value}' }`,
+  );
+  const data = await (await driveFetch(`${API}/files?q=${q}&fields=files(id)&spaces=drive&pageSize=1`)).json();
+  return data.files?.[0]?.id ?? null;
+}
