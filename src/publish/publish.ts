@@ -1,5 +1,5 @@
 import { apiUrl, config } from '../config';
-import { getDriveToken, getIdToken, getUser, updateStoredUser } from '../auth/google';
+import { getDriveToken, getUser, updateStoredUser } from '../auth/google';
 import { allNotes, getNote, metaGet, metaSet } from '../store/db';
 import type { Note } from '../store/models';
 import { ensureSlug, saveNote } from '../store/workspace';
@@ -54,10 +54,11 @@ export async function checkUsername(name: string): Promise<{ available: boolean;
 }
 
 export async function claimUsername(name: string): Promise<void> {
-  const idToken = getIdToken();
-  if (!idToken) throw new Error('Sign in first.');
+  if (!getUser()) throw new Error('Sign in first.');
   const err = validateUsername(name);
   if (err) throw new Error(err);
+
+  const accessToken = await getDriveToken(false);
 
   // Make sure the Drive profile file exists and is public before we register the pointer.
   const profileFileId = await ensureProfileFile();
@@ -65,7 +66,7 @@ export async function claimUsername(name: string): Promise<void> {
 
   const res = await fetch(apiUrl('/claim'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ username: name, profileFileId, profileUrl }),
   });
   const data = await res.json().catch(() => ({}));

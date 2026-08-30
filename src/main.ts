@@ -5,17 +5,30 @@ import 'highlight.js/styles/github.css';
 import { reflect } from './ui/settings';
 import { mountToasts } from './ui/toast';
 import { bus } from './util/misc';
-import { initAuth } from './auth/google';
+import { handleOAuthCallback, initAuth } from './auth/google';
 import { bootstrapWorkspace, rebuildSearch } from './store/workspace';
 import { startAutoSync } from './sync/sync';
 import { watchPublishing } from './publish/publish';
 
 const RESERVED_FIRST_SEGMENT = new Set([
-  'about', 'privacy', 'api', 'assets', 'icons', 'favicon.svg', 'robots.txt', 'sitemap.xml',
+  'about', 'privacy', 'oauth2', 'api', 'assets', 'icons', 'favicon.svg', 'robots.txt', 'sitemap.xml',
   'manifest.webmanifest', 'sw.js', 'registrations', 'index.html', 'og.png',
 ]);
 
 const app = document.getElementById('app')!;
+
+// A dynamic-import failure almost always means a new deploy replaced the chunk this page
+// still references. Reload once to pick up the new build (StaleWhileRevalidate SW + this).
+let reloadedForChunk = false;
+window.addEventListener('vite:preloadError', (e) => {
+  e.preventDefault();
+  if (!reloadedForChunk && !sessionStorage.getItem('chunk-reloaded')) {
+    reloadedForChunk = true;
+    sessionStorage.setItem('chunk-reloaded', '1');
+    location.reload();
+  }
+});
+window.addEventListener('load', () => setTimeout(() => sessionStorage.removeItem('chunk-reloaded'), 5000));
 
 async function boot() {
   reflect();
@@ -40,6 +53,11 @@ async function route() {
   const segments = path.split('/').filter(Boolean);
 
   if (segments.length === 0) {
+    await mountWorkspace();
+    return;
+  }
+  if (segments[0] === 'oauth2') {
+    await handleOAuthCallback(); // exchanges ?code=…, then replaces URL with /
     await mountWorkspace();
     return;
   }

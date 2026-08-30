@@ -1,207 +1,235 @@
-import { config, cloudEnabled } from '../config';
+import { apiUrl, cloudEnabled, config } from '../config';
 import { metaGet, metaSet } from '../store/db';
 import type { UserProfile } from '../store/models';
 import { bus, toast } from '../util/misc';
 
-/* Minimal typings for the Google Identity Services global. */
-declare global {
-  interface Window {
-    google?: any;
-  }
-}
+/**
+ * Google auth via the OAuth 2.0 authorization-code flow with a full-page redirect.
+ *
+ * No popups, no hidden iframes, no FedCM — so it behaves identically in Chrome, Firefox
+ * (Total Cookie Protection), Safari, and locked-down browsers. One redirect grants both
+ * identity (id_token) and Drive access (drive.file). The Cloudflare Worker holds the client
+ * secret and does the code/refresh exchange; the long-lived refresh token is stored in this
+ * browser's IndexedDB (same trust boundary as the notes themselves), so sync resumes with
+ * no user action on every later visit.
+ */
 
 interface TokenState {
   access_token: string;
   expires_at: number;
 }
 
+const SCOPE = ['openid', 'email', 'profile', config.DRIVE_SCOPE].join(' ');
+const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
+const redirectUri = () => `${location.origin}/oauth2`;
+
 let idToken: string | null = null;
 let tokenState: TokenState | null = null;
-let tokenClient: any = null;
 let currentUser: UserProfile | null = null;
-
-// One in-flight token request at a time; concurrent callers share it. A stuck *silent*
-// request (Firefox blocks the hidden iframe under Total Cookie Protection) must never
-// block a later *interactive* request, so we track which kind is pending and time it out.
-interface Pending {
-  promise: Promise<string>;
-  resolve: (t: string) => void;
-  reject: (e: Error) => void;
-  silent: boolean;
-  timer: ReturnType<typeof setTimeout>;
-}
-let pending: Pending | null = null;
-
-function settlePending(kind: 'resolve' | 'reject', value: string | Error) {
-  if (!pending) return;
-  clearTimeout(pending.timer);
-  const p = pending;
-  pending = null;
-  if (kind === 'resolve') p.resolve(value as string);
-  else p.reject(value as Error);
-}
+let refreshInFlight: Promise<string> | null = null;
 
 export const getUser = () => currentUser;
 export const isSignedIn = () => !!currentUser;
 export const getIdToken = () => idToken;
 export const isDriveConnected = () => !!tokenState && tokenState.expires_at > Date.now();
-/** Drop the cached access token so the next getDriveToken() fetches a fresh one. */
 export const invalidateDriveToken = () => {
   tokenState = null;
 };
 
 function decodeJwt(jwt: string): any {
   const [, payload] = jwt.split('.');
-  return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+  return JSON.parse(decodeURIComponent(escape(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))));
 }
 
-async function waitForGis(timeoutMs = 10000): Promise<void> {
-  const start = Date.now();
-  while (!window.google?.accounts?.id || !window.google?.accounts?.oauth2) {
-    if (Date.now() - start > timeoutMs) throw new Error('Google sign-in failed to load (offline?)');
-    await new Promise((r) => setTimeout(r, 100));
-  }
+/* ---------- PKCE helpers ---------- */
+
+function b64url(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function randomToken(bytes = 48): string {
+  const a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return b64url(a);
+}
+async function s256(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return b64url(new Uint8Array(digest));
 }
 
-/** Called once at startup. Restores the cached session and silently re-links Drive. */
+/* ---------- lifecycle ---------- */
+
+/** Restore the cached session at startup. The redirect callback is handled by the router. */
 export async function initAuth(): Promise<void> {
   if (!cloudEnabled()) return;
   currentUser = await metaGet<UserProfile | null>('user', null);
   bus.emit('auth', currentUser);
-  try {
-    await waitForGis();
-  } catch {
-    return; // offline — keep cached user, cloud actions retry later
-  }
-
-  window.google.accounts.id.initialize({
-    client_id: config.GOOGLE_CLIENT_ID,
-    callback: onCredential,
-    auto_select: true,
-    use_fedcm_for_prompt: true,
-  });
-
-  tokenClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: config.GOOGLE_CLIENT_ID,
-    scope: config.DRIVE_SCOPE,
-    callback: (resp: any) => {
-      if (resp.error) {
-        bus.emit('drive-token-error', resp);
-        settlePending('reject', new Error(resp.error === 'interaction_required' ? 'needs-consent' : resp.error));
-        return;
-      }
-      tokenState = {
-        access_token: resp.access_token,
-        expires_at: Date.now() + (Number(resp.expires_in ?? 3600) - 120) * 1000,
-      };
-      void metaSet('driveGranted', true);
-      settlePending('resolve', resp.access_token);
-      bus.emit('drive-connected');
-    },
-    error_callback: (err: any) => {
-      // Popup closed/blocked, or silent request could not complete.
-      bus.emit('drive-token-error', err);
-      settlePending('reject', new Error(err?.type === 'popup_closed' ? 'popup-closed' : err?.type || 'drive-auth-failed'));
-    },
-  });
 }
 
-/**
- * Called by the sync layer after startup. Tries to get a Drive token with no UI — the
- * `drive.file` grant is per Google-account + client, so this succeeds on a new browser too
- * as long as the user authorized Drive once anywhere. Falls back to "Connect Drive".
- */
-export async function restoreDriveSession(): Promise<void> {
-  if (!cloudEnabled() || !currentUser || !tokenClient) return;
-  try {
-    await getDriveToken(true);
-  } catch {
-    if (await metaGet('driveGranted', false)) bus.emit('drive-needs-reconnect');
-  }
-}
-
-async function onCredential(resp: { credential: string }) {
-  idToken = resp.credential;
-  const claims = decodeJwt(resp.credential);
-  const existing = await metaGet<UserProfile | null>('user', null);
-  const sameUser = !existing || existing.sub === claims.sub;
-  currentUser = {
-    ...(sameUser ? existing ?? {} : {}),
-    sub: claims.sub,
-    email: claims.email,
-    name: claims.name ?? claims.email,
-    picture: claims.picture ?? '',
-  };
-  await metaSet('user', currentUser);
-  bus.emit('auth', currentUser);
-  toast(`Signed in as ${currentUser.name}`, 'success');
-  // Chain straight into a silent Drive token so backup starts without another click.
-  getDriveToken(true).catch(() => {/* user can hit "Connect Drive" */});
-}
-
+/** Start the redirect flow. Navigates away and returns to /oauth2?code=… */
 export async function signIn(): Promise<void> {
   if (!cloudEnabled()) {
     toast('Google sign-in is not configured yet.', 'error');
     return;
   }
-  await waitForGis();
-  window.google.accounts.id.prompt();
+  const verifier = randomToken(48);
+  const state = randomToken(16);
+  sessionStorage.setItem('oauth_verifier', verifier);
+  sessionStorage.setItem('oauth_state', state);
+
+  const params = new URLSearchParams({
+    client_id: config.GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri(),
+    response_type: 'code',
+    scope: SCOPE,
+    access_type: 'offline',
+    include_granted_scopes: 'true',
+    prompt: 'consent',
+    state,
+    code_challenge: await s256(verifier),
+    code_challenge_method: 'S256',
+  });
+  location.assign(`${AUTH_ENDPOINT}?${params}`);
 }
 
-export function renderSignInButton(el: HTMLElement): void {
-  if (!cloudEnabled() || !window.google?.accounts?.id) return;
-  window.google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', text: 'continue_with', shape: 'pill' });
+/** GIS button is gone; the account modal renders its own button. Kept for call sites. */
+export function renderSignInButton(_el: HTMLElement): void {}
+
+/** Called by the router when the browser lands on /oauth2 after the Google redirect. */
+export async function handleOAuthCallback(): Promise<void> {
+  const q = new URLSearchParams(location.search);
+  const code = q.get('code');
+  const state = q.get('state');
+  const error = q.get('error');
+  const savedState = sessionStorage.getItem('oauth_state');
+  const verifier = sessionStorage.getItem('oauth_verifier');
+  sessionStorage.removeItem('oauth_state');
+  sessionStorage.removeItem('oauth_verifier');
+  history.replaceState(null, '', '/');
+
+  if (error) {
+    toast(error === 'access_denied' ? 'Sign-in cancelled.' : `Sign-in failed: ${error}`, 'error');
+    return;
+  }
+  if (!code || !verifier || state !== savedState) {
+    toast('Sign-in could not be verified — please try again.', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(apiUrl('/oauth/exchange'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, redirect_uri: redirectUri(), code_verifier: verifier }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? `exchange failed (${res.status})`);
+    await applyTokens(data);
+    toast(`Signed in as ${currentUser?.name ?? 'you'}`, 'success');
+  } catch (e) {
+    toast('Could not complete sign-in: ' + (e as Error).message, 'error');
+  }
+}
+
+async function applyTokens(data: {
+  access_token?: string;
+  expires_in?: number;
+  refresh_token?: string | null;
+  id_token?: string | null;
+}): Promise<void> {
+  if (data.access_token) {
+    tokenState = { access_token: data.access_token, expires_at: Date.now() + (Number(data.expires_in ?? 3600) - 120) * 1000 };
+  }
+  if (data.refresh_token) await metaSet('refreshToken', data.refresh_token);
+  if (data.id_token) {
+    idToken = data.id_token;
+    const c = decodeJwt(data.id_token);
+    const existing = await metaGet<UserProfile | null>('user', null);
+    const same = !existing || existing.sub === c.sub;
+    currentUser = {
+      ...(same ? existing ?? {} : {}),
+      sub: c.sub,
+      email: c.email,
+      name: c.name ?? c.email,
+      picture: c.picture ?? '',
+    };
+    await metaSet('user', currentUser);
+  }
+  await metaSet('driveGranted', true);
+  bus.emit('auth', currentUser);
+  bus.emit('drive-connected');
 }
 
 export async function signOut(): Promise<void> {
-  if (window.google?.accounts?.id) window.google.accounts.id.disableAutoSelect();
-  if (tokenState && window.google?.accounts?.oauth2) {
-    try {
-      window.google.accounts.oauth2.revoke(tokenState.access_token, () => {});
-    } catch { /* ignore */ }
+  const rt = await metaGet<string>('refreshToken', '');
+  if (rt) {
+    // Best-effort revoke; ignore CORS / network failures.
+    fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(rt)}`, { method: 'POST', mode: 'no-cors' }).catch(() => {});
   }
   idToken = null;
   tokenState = null;
   currentUser = null;
-  if (pending) settlePending('reject', new Error('signed-out'));
+  refreshInFlight = null;
   await metaSet('user', null);
+  await metaSet('refreshToken', '');
   await metaSet('driveGranted', false);
   bus.emit('auth', null);
 }
 
+/* ---------- token access ---------- */
+
 /**
  * Resolve a valid Drive access token.
- * @param silent  true = never show UI (rejects if user interaction is required)
+ * @param silent  true = never navigate away; rejects if a fresh sign-in is required.
  */
-export function getDriveToken(silent = false): Promise<string> {
-  if (tokenState && tokenState.expires_at > Date.now()) return Promise.resolve(tokenState.access_token);
-  if (!tokenClient) return Promise.reject(new Error('Auth not initialised'));
+export async function getDriveToken(silent = false): Promise<string> {
+  if (tokenState && tokenState.expires_at > Date.now()) return tokenState.access_token;
 
-  if (pending) {
-    // Share the in-flight request if it's interactive (covers everything) or the same kind.
-    if (!pending.silent || pending.silent === silent) return pending.promise;
-    // We need interactive but a (possibly stuck) silent request is in flight — supersede it.
-    settlePending('reject', new Error('superseded'));
+  const rt = await metaGet<string>('refreshToken', '');
+  if (!rt) {
+    if (silent) throw new Error('needs-consent');
+    await signIn(); // navigates away
+    return new Promise<string>(() => {});
   }
 
-  let resolve!: (t: string) => void;
-  let reject!: (e: Error) => void;
-  const promise = new Promise<string>((res, rej) => {
-    resolve = res;
-    reject = rej;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const res = await fetch(apiUrl('/oauth/refresh'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refresh_token: rt }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (data.reauth) {
+        await metaSet('refreshToken', '');
+        bus.emit('drive-needs-reconnect');
+        if (!silent) {
+          await signIn();
+          return new Promise<string>(() => {});
+        }
+      }
+      throw new Error(data.error ?? `refresh failed (${res.status})`);
+    }
+    tokenState = { access_token: data.access_token, expires_at: Date.now() + (Number(data.expires_in ?? 3600) - 120) * 1000 };
+    if (data.id_token) idToken = data.id_token;
+    bus.emit('drive-connected');
+    return data.access_token as string;
+  })().finally(() => {
+    refreshInFlight = null;
   });
-  // Silent requests can hang forever in Firefox; give them a short deadline.
-  const timer = setTimeout(
-    () => settlePending('reject', new Error(silent ? 'needs-consent' : 'timeout')),
-    silent ? 6000 : 150_000,
-  );
-  pending = { promise, resolve, reject, silent, timer };
+  return refreshInFlight;
+}
+
+/** Startup: silently mint an access token from the stored refresh token, if any. */
+export async function restoreDriveSession(): Promise<void> {
+  if (!cloudEnabled() || !currentUser) return;
   try {
-    tokenClient.requestAccessToken({ prompt: silent ? 'none' : '' });
-  } catch (e) {
-    settlePending('reject', e as Error);
+    await getDriveToken(true);
+  } catch {
+    if (await metaGet('driveGranted', false)) bus.emit('drive-needs-reconnect');
   }
-  return promise;
 }
 
 export async function updateStoredUser(patch: Partial<UserProfile>): Promise<void> {

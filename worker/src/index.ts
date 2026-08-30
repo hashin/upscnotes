@@ -3,8 +3,9 @@
  *
  * The app is hosted as a static site on GitHub Pages; this Worker is deployed separately
  * (e.g. upscnotes-api.<account>.workers.dev) and does only:
- *   1. verify a Google ID token
- *   2. keep the `username -> profile pointer` registry unique (D1), and serve public
+ *   1. the OAuth code<->token exchange + refresh (holds the client secret)
+ *   2. verify the caller's Google access token (tokeninfo)
+ *   3. keep the `username -> profile pointer` registry unique (D1), and serve public
  *      username -> profile lookups (`GET /u/<name>`, edge-cached via the Cache API)
  *
  * Notes never pass through here — they live in each student's Google Drive and are read by
@@ -14,6 +15,8 @@
 export interface Env {
   DB: D1Database;
   GOOGLE_CLIENT_ID: string;
+  /** OAuth client secret — Worker secret, only used for the redirect (auth-code) flow. */
+  GOOGLE_CLIENT_SECRET: string;
 }
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9-]{2,29}$/;
@@ -43,6 +46,8 @@ export default {
     const path = url.pathname.replace(/^\/api/, '').replace(/\/$/, '') || '/';
     try {
       if (request.method === 'GET' && path === '/') return json({ ok: true, service: 'upscnotes-api' });
+      if (request.method === 'POST' && path === '/oauth/exchange') return await oauthExchange(request, env);
+      if (request.method === 'POST' && path === '/oauth/refresh') return await oauthRefresh(request, env);
       if (request.method === 'GET' && path === '/check') return await check(env, url);
       if (request.method === 'GET' && path.startsWith('/u/')) return await resolveProfile(env, ctx, request, decodeURIComponent(path.slice(3)));
       if (request.method === 'POST' && path === '/claim') return await claim(request, env);
@@ -55,6 +60,67 @@ export default {
     }
   },
 };
+
+/* ---------------- OAuth redirect (auth-code) flow ---------------- */
+
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+async function oauthExchange(request: Request, env: Env): Promise<Response> {
+  if (!env.GOOGLE_CLIENT_SECRET) return json({ error: 'server missing GOOGLE_CLIENT_SECRET' }, 500);
+  const { code, redirect_uri, code_verifier } = await request.json<{
+    code?: string;
+    redirect_uri?: string;
+    code_verifier?: string;
+  }>();
+  if (!code || !redirect_uri || !code_verifier) return json({ error: 'missing code / redirect_uri / verifier' }, 400);
+
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri,
+    code_verifier,
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+  });
+  const res = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = (await res.json()) as any;
+  if (!res.ok) return json({ error: data.error_description ?? data.error ?? 'token exchange failed' }, 400);
+  return json({
+    access_token: data.access_token,
+    expires_in: data.expires_in,
+    refresh_token: data.refresh_token ?? null,
+    id_token: data.id_token ?? null,
+    scope: data.scope,
+  });
+}
+
+async function oauthRefresh(request: Request, env: Env): Promise<Response> {
+  if (!env.GOOGLE_CLIENT_SECRET) return json({ error: 'server missing GOOGLE_CLIENT_SECRET' }, 500);
+  const { refresh_token } = await request.json<{ refresh_token?: string }>();
+  if (!refresh_token) return json({ error: 'missing refresh_token' }, 400);
+
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token,
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+  });
+  const res = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = (await res.json()) as any;
+  if (!res.ok) {
+    // invalid_grant => the refresh token was revoked or expired; tell the client to re-auth.
+    return json({ error: data.error ?? 'refresh failed', reauth: data.error === 'invalid_grant' }, 401);
+  }
+  return json({ access_token: data.access_token, expires_in: data.expires_in, id_token: data.id_token ?? null });
+}
 
 /**
  * Public: username -> profile pointer. Edge-cached so repeat profile views cost ~nothing.
@@ -101,7 +167,7 @@ async function check(env: Env, url: URL): Promise<Response> {
 }
 
 async function claim(request: Request, env: Env): Promise<Response> {
-  const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
+  const claims = await verifyCaller(request, env);
   const body = await request.json<{ username?: string; profileUrl?: string; profileFileId?: string }>();
   const name = (body.username ?? '').toLowerCase().trim();
   const bad = validateName(name);
@@ -136,7 +202,7 @@ async function claim(request: Request, env: Env): Promise<Response> {
 }
 
 async function updateProfile(request: Request, env: Env): Promise<Response> {
-  const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
+  const claims = await verifyCaller(request, env);
   const body = await request.json<{ profileUrl?: string; profileFileId?: string }>();
   const row = await env.DB.prepare('SELECT username FROM users WHERE sub = ?').bind(claims.sub).first<{ username: string }>();
   if (!row) return json({ error: 'no username claimed' }, 404);
@@ -149,7 +215,7 @@ async function updateProfile(request: Request, env: Env): Promise<Response> {
 }
 
 async function deleteAccount(request: Request, env: Env): Promise<Response> {
-  const claims = await verifyGoogleToken(request, env.GOOGLE_CLIENT_ID);
+  const claims = await verifyCaller(request, env);
   const row = await env.DB.prepare('SELECT username FROM users WHERE sub = ?').bind(claims.sub).first<{ username: string }>();
   if (row) {
     await env.DB.batch([
@@ -161,63 +227,29 @@ async function deleteAccount(request: Request, env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
-/* ---------------- Google ID token verification ---------------- */
+/* ---------------- caller identity ---------------- */
 
-interface GoogleClaims {
+interface Caller {
   sub: string;
   email?: string;
-  aud: string;
-  iss: string;
-  exp: number;
 }
 
-let jwksCache: { keys: JsonWebKey[]; fetchedAt: number } | null = null;
-
-async function getJwks(): Promise<any[]> {
-  if (jwksCache && Date.now() - jwksCache.fetchedAt < 3_600_000) return jwksCache.keys;
-  const res = await fetch('https://www.googleapis.com/oauth2/v3/certs', { cf: { cacheTtl: 3600, cacheEverything: true } });
-  const data = (await res.json()) as { keys: JsonWebKey[] };
-  jwksCache = { keys: data.keys, fetchedAt: Date.now() };
-  return data.keys;
-}
-
-function b64urlToBytes(s: string): Uint8Array {
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
-  while (s.length % 4) s += '=';
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-async function verifyGoogleToken(request: Request, clientId: string): Promise<GoogleClaims> {
-  if (!clientId) throw unauthorized('server missing GOOGLE_CLIENT_ID');
+/**
+ * Verify the Bearer *access token* the client sent by asking Google's tokeninfo endpoint.
+ * Confirms the token was minted for THIS OAuth client (aud) and pulls the stable user id.
+ */
+async function verifyCaller(request: Request, env: Env): Promise<Caller> {
+  if (!env.GOOGLE_CLIENT_ID) throw unauthorized('server missing GOOGLE_CLIENT_ID');
   const auth = request.headers.get('authorization') ?? '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token) throw unauthorized('missing token');
 
-  const [h, p, s] = token.split('.');
-  if (!h || !p || !s) throw unauthorized('malformed token');
-  let header: { kid?: string };
-  let payload: GoogleClaims;
-  try {
-    header = JSON.parse(new TextDecoder().decode(b64urlToBytes(h)));
-    payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p))) as GoogleClaims;
-  } catch {
-    throw unauthorized('malformed token');
-  }
-
-  if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') throw unauthorized('bad issuer');
-  if (payload.aud !== clientId) throw unauthorized('bad audience');
-  if (payload.exp * 1000 < Date.now()) throw unauthorized('token expired');
-
-  const jwk = (await getJwks()).find((k) => (k as any).kid === header.kid);
-  if (!jwk) throw unauthorized('unknown key');
-
-  const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-  const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) throw unauthorized('bad signature');
-  return payload;
+  const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`);
+  const info = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw unauthorized('invalid token');
+  if (info.aud !== env.GOOGLE_CLIENT_ID && info.azp !== env.GOOGLE_CLIENT_ID) throw unauthorized('token not for this app');
+  if (!info.sub) throw unauthorized('no subject');
+  return { sub: info.sub, email: info.email };
 }
 
 function errResponse(msg: string, status: number): Error {

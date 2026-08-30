@@ -1,5 +1,5 @@
 import { cloudEnabled, config } from '../config';
-import { getDriveToken, getUser, isDriveConnected, renderSignInButton, signIn, signOut } from '../auth/google';
+import { getUser, isDriveConnected, signIn, signOut } from '../auth/google';
 import { checkUsername, claimUsername, updateProfileMeta } from '../publish/publish';
 import { fullResync, syncNow } from '../sync/sync';
 import { bus, debounce, h, toast } from '../util/misc';
@@ -38,16 +38,18 @@ function fill(body: HTMLElement, close: () => void): void {
 
   if (!user) {
     body.append(
-      h('p', { class: 'modal-message' }, ['Sign in with Google to back up your notes to your own Drive and publish a public page.']),
+      h('p', { class: 'modal-message' }, [
+        'Sign in with Google to back up your notes to your own Drive and publish a public page. ',
+        "You'll be taken to Google and brought straight back.",
+      ]),
+      h('button', {
+        class: 'btn btn-primary',
+        onclick: (e: Event) => {
+          (e.currentTarget as HTMLButtonElement).textContent = 'Redirecting to Google…';
+          void signIn();
+        },
+      }, ['Continue with Google']),
     );
-    const btnHost = h('div', { class: 'gsi-host' });
-    const fallback = h('button', { class: 'btn btn-primary', onclick: () => void signIn() }, ['Continue with Google']);
-    body.append(btnHost, fallback);
-    setTimeout(() => {
-      renderSignInButton(btnHost);
-      // Google's button renders async; hide our fallback once it's there.
-      setTimeout(() => { if (btnHost.childElementCount > 0) fallback.style.display = 'none'; }, 400);
-    }, 60);
     return;
   }
 
@@ -69,28 +71,14 @@ function fill(body: HTMLElement, close: () => void): void {
     );
   } else {
     driveRow.append(
+      h('p', { class: 'modal-message' }, ['Reconnect Google Drive to resume backup.']),
       h('button', {
         class: 'btn btn-primary',
         onclick: (e: Event) => {
-          const btn = e.currentTarget as HTMLButtonElement;
-          btn.disabled = true;
-          btn.textContent = 'Opening Google…';
-          // Fire the token request synchronously so Firefox allows the popup.
-          getDriveToken(false)
-            .then(() => toast('Google Drive connected — syncing.', 'success'))
-            .catch((err: Error) => {
-              btn.disabled = false;
-              btn.textContent = 'Connect Google Drive';
-              const m = err.message;
-              toast(
-                m === 'popup-closed' ? 'Drive window was closed before finishing.'
-                : m === 'timeout' ? 'Google did not respond — try again.'
-                : 'Could not connect Drive: ' + m,
-                'error',
-              );
-            });
+          (e.currentTarget as HTMLButtonElement).textContent = 'Redirecting to Google…';
+          void signIn();
         },
-      }, ['Connect Google Drive']),
+      }, ['Reconnect Google Drive']),
     );
   }
   body.append(h('h3', {}, ['Backup']), driveRow);

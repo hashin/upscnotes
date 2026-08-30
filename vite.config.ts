@@ -51,6 +51,12 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // New SW takes over the page immediately, so a deployed build's chunk hashes and
+        // the cached index.html can't drift apart (the "Failed to fetch dynamically
+        // imported module" error).
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
         // Precache the shell + editor only. Heavy on-demand chunks (mermaid, katex,
         // highlight.js, jszip, cytoscape) are runtime-cached the first time they load.
         globPatterns: ['**/*.{css,html,svg,png,woff2}', 'assets/index-*.js', 'assets/codemirror-*.js', 'assets/markdown-*.js'],
