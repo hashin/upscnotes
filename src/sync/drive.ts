@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { getDriveToken } from '../auth/google';
+import { getDriveToken, invalidateDriveToken } from '../auth/google';
 
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -14,14 +14,19 @@ export interface DriveFile {
   trashed?: boolean;
 }
 
-async function authHeaders(interactive = true): Promise<Record<string, string>> {
-  const token = await getDriveToken(interactive);
-  return { Authorization: `Bearer ${token}` };
-}
-
-async function driveFetch(url: string, init: RequestInit = {}, interactive = true): Promise<Response> {
-  const res = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders(interactive)) } });
-  if (res.status === 401) throw new Error('drive-unauthorized');
+async function driveFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  // Background Drive I/O always uses a silent token; the "Connect Drive" button is the
+  // only place that may show consent UI.
+  let token = await getDriveToken(true);
+  let res = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+  if (res.status === 401) {
+    // Token rejected — force one refresh, then give up (sync surfaces a reconnect prompt).
+    invalidateDriveToken();
+    token = await getDriveToken(true).catch(() => '');
+    if (!token) throw new Error('drive-unauthorized');
+    res = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    if (res.status === 401) throw new Error('drive-unauthorized');
+  }
   if (!res.ok) throw new Error(`Drive ${res.status}: ${await res.text().catch(() => res.statusText)}`);
   return res;
 }

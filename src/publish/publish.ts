@@ -161,16 +161,17 @@ export async function setPublished(noteId: string, published: boolean): Promise<
   if (!note) return;
   if (published && !getUser()?.username) throw new Error('Pick a username first.');
 
-  await getDriveToken();
-  // Ensure it is synced so it has a Drive file id.
-  if (!note.driveFileId) {
-    await syncNow('pre-publish');
-  }
-  const fresh = await getNote(noteId);
-  if (!fresh?.driveFileId) throw new Error('Sync the note to Drive first.');
+  await getDriveToken(true).catch(() => getDriveToken(false));
 
-  const slug = published ? await ensureSlug(fresh) : fresh.slug;
+  const slug = published ? await ensureSlug(note) : note.slug;
   await saveNote(noteId, { published, slug });
+
+  // Sync so this note — and anything published from other devices — is on Drive before
+  // we regenerate the public index.
+  await syncNow('publish');
+
+  const fresh = await getNote(noteId);
+  if (!fresh?.driveFileId) throw new Error('Could not back this note up to Drive — check your connection and retry.');
 
   if (published) await makePublic(fresh.driveFileId);
   else await makePrivate(fresh.driveFileId).catch(() => {});

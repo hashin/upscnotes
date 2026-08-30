@@ -1,10 +1,19 @@
 import { h } from '../util/misc';
 
-export function modal(title: string, body: HTMLElement, actions: HTMLElement[] = []): () => void {
+export function modal(
+  title: string,
+  body: HTMLElement,
+  actions: HTMLElement[] = [],
+  onClose?: () => void,
+): () => void {
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     overlay.classList.remove('in');
     setTimeout(() => overlay.remove(), 200);
     document.removeEventListener('keydown', onKey);
+    onClose?.();
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') close();

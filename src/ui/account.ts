@@ -6,18 +6,33 @@ import { bus, debounce, h, toast } from '../util/misc';
 import { modal } from './modal';
 
 export function openAccountModal(): void {
-  const user = getUser();
   const body = h('div', { class: 'account' });
+  let close = () => {};
+  const offs: Array<() => void> = [];
+  const cleanup = () => offs.forEach((f) => f());
+
+  // Rebuild the modal in place whenever sign-in / Drive state changes.
+  const rerender = () => {
+    body.innerHTML = '';
+    fill(body, () => close());
+  };
+  offs.push(bus.on('auth', rerender));
+  offs.push(bus.on('drive-connected', rerender));
+  offs.push(bus.on('drive-needs-reconnect', rerender));
+
+  fill(body, () => close());
+  close = modal('Account', body, [], cleanup);
+}
+
+function fill(body: HTMLElement, close: () => void): void {
+  const user = getUser();
 
   if (!cloudEnabled()) {
     body.append(
       h('p', { class: 'modal-message' }, [
-        'Cloud sync is not configured for this deployment yet. The editor, offline storage and export all work without it. See ',
-        h('code', {}, ['docs/SETUP.md']),
-        ' to enable Google sign-in, Drive backup and publishing.',
+        'Cloud sync is not configured for this deployment yet. The editor, offline storage and export all work without it.',
       ]),
     );
-    modal('Account', body);
     return;
   }
 
@@ -26,11 +41,13 @@ export function openAccountModal(): void {
       h('p', { class: 'modal-message' }, ['Sign in with Google to back up your notes to your own Drive and publish a public page.']),
     );
     const btnHost = h('div', { class: 'gsi-host' });
-    body.append(btnHost);
     const fallback = h('button', { class: 'btn btn-primary', onclick: () => void signIn() }, ['Continue with Google']);
-    body.append(fallback);
-    modal('Sign in', body);
-    setTimeout(() => renderSignInButton(btnHost), 60);
+    body.append(btnHost, fallback);
+    setTimeout(() => {
+      renderSignInButton(btnHost);
+      // Google's button renders async; hide our fallback once it's there.
+      setTimeout(() => { if (btnHost.childElementCount > 0) fallback.style.display = 'none'; }, 400);
+    }, 60);
     return;
   }
 
@@ -44,24 +61,27 @@ export function openAccountModal(): void {
 
   /* Drive */
   const driveRow = h('div', { class: 'account-row' });
-  const renderDrive = () => {
-    driveRow.innerHTML = '';
-    if (isDriveConnected()) {
-      driveRow.append(
-        h('span', { class: 'pill pill-ok' }, ['Drive connected']),
-        h('button', { class: 'btn btn-sm', onclick: () => void syncNow('manual') }, ['Sync now']),
-        h('button', { class: 'btn btn-sm', onclick: () => void fullResync() }, ['Full re-sync']),
-      );
-    } else {
-      driveRow.append(
-        h('button', { class: 'btn btn-primary', onclick: async () => { try { await getDriveToken(); renderDrive(); } catch (e) { toast((e as Error).message, 'error'); } } }, [
-          'Connect Google Drive',
-        ]),
-      );
-    }
-  };
-  renderDrive();
-  bus.on('drive-connected', renderDrive);
+  if (isDriveConnected()) {
+    driveRow.append(
+      h('span', { class: 'pill pill-ok' }, ['Drive connected']),
+      h('button', { class: 'btn btn-sm', onclick: () => void syncNow('manual') }, ['Sync now']),
+      h('button', { class: 'btn btn-sm', onclick: () => void fullResync() }, ['Full re-sync']),
+    );
+  } else {
+    driveRow.append(
+      h('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          try {
+            await getDriveToken(false);
+            toast('Google Drive connected — syncing.', 'success');
+          } catch (e) {
+            toast('Could not connect Drive: ' + (e as Error).message, 'error');
+          }
+        },
+      }, ['Connect Google Drive']),
+    );
+  }
   body.append(h('h3', {}, ['Backup']), driveRow);
 
   /* Username / publishing */
@@ -92,12 +112,18 @@ export function openAccountModal(): void {
     body.append(usernameClaimForm());
   }
 
-  const foot = h('div', { class: 'account-foot' }, [
-    h('button', { class: 'btn btn-sm', onclick: async () => { await signOut(); toast('Signed out.'); } }, ['Sign out']),
-  ]);
-  body.append(foot);
-
-  modal('Account', body);
+  body.append(
+    h('div', { class: 'account-foot' }, [
+      h('button', {
+        class: 'btn btn-sm',
+        onclick: async () => {
+          await signOut();
+          toast('Signed out.');
+          close();
+        },
+      }, ['Sign out']),
+    ]),
+  );
 }
 
 function usernameClaimForm(): HTMLElement {
@@ -140,8 +166,7 @@ function usernameClaimForm(): HTMLElement {
     btn.textContent = 'Claiming…';
     try {
       await claimUsername(input.value.trim());
-      bus.emit('close-modals');
-      openAccountModal();
+      // updateStoredUser fires 'auth' -> the modal re-renders to the claimed state.
     } catch (e) {
       toast((e as Error).message, 'error');
       btn.disabled = false;

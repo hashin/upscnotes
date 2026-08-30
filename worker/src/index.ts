@@ -78,7 +78,7 @@ async function resolveProfile(env: Env, ctx: ExecutionContext, request: Request,
   const res = json(
     { username: name, profileUrl: row.profile_url, updatedAt: row.updated_at },
     200,
-    { 'cache-control': 'public, max-age=300, s-maxage=300' },
+    { 'cache-control': 'public, max-age=60, s-maxage=60' },
   );
   ctx.waitUntil(cache.put(cacheKey, res.clone()));
   return res;

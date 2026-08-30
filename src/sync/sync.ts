@@ -1,4 +1,4 @@
-import { isDriveConnected, isSignedIn } from '../auth/google';
+import { isDriveConnected, isSignedIn, restoreDriveSession } from '../auth/google';
 import {
   allFolders,
   allNotesIncludingTrash,
@@ -29,17 +29,32 @@ let timer: ReturnType<typeof setInterval> | null = null;
 
 export function startAutoSync(): void {
   bus.on('sync-request', () => scheduleSync());
-  bus.on('drive-connected', () => syncNow('initial'));
+  bus.on('drive-connected', () => syncNow('drive-connected'));
+  bus.on('drive-needs-reconnect', () =>
+    bus.emit('sync-state', { state: 'error', message: 'Reconnect Google Drive to resume backup' }),
+  );
   window.addEventListener('online', () => syncNow('online'));
+
+  // Pull when the tab regains focus (see other devices' latest); push when it hides.
+  document.addEventListener('visibilitychange', () => {
+    syncNow(document.visibilityState === 'visible' ? 'focus' : 'hide');
+  });
+  window.addEventListener('focus', () => scheduleSync());
+
   if (timer) clearInterval(timer);
-  timer = setInterval(() => scheduleSync(), 60_000);
+  timer = setInterval(() => syncNow('interval'), 30_000);
+
+  // Re-link Drive with no UI (if previously granted), then do a first sync.
+  void restoreDriveSession().then(() => {
+    if (canSync()) syncNow('startup');
+  });
 }
 
 let scheduleT: ReturnType<typeof setTimeout> | null = null;
 function scheduleSync() {
   if (!canSync()) return;
   if (scheduleT) clearTimeout(scheduleT);
-  scheduleT = setTimeout(() => syncNow('auto'), 4000);
+  scheduleT = setTimeout(() => syncNow('auto'), 2500);
 }
 
 function canSync(): boolean {
@@ -151,22 +166,48 @@ async function pull(remoteById: Map<string, DriveFile>): Promise<void> {
       });
       bus.emit('note-external-update', nid);
     } else if (localHash !== remoteHash) {
-      // Both sides changed -> keep local, fork remote copy into a new local note.
-      const folder = await folderByName(meta.folder || 'Conflicts');
-      await putNote({
-        id: uid(),
-        folderId: folder.id,
-        title: `${meta.title || local.title} (conflicted copy)`,
-        markdown: body,
-        tags: local.tags,
-        syllabus: local.syllabus,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        published: false,
-        order: 999,
-      });
-      await putNote({ ...local, driveModified: file.modifiedTime });
-      toast(`Merge conflict on "${local.title}" — kept both copies.`, 'error');
+      // Both sides changed since last sync. Prefer the newer edit by timestamp so the user
+      // sees a single version across devices; only keep a conflict copy when the two edits
+      // are genuinely concurrent (within 90s) to avoid silent data loss.
+      const remoteUpdated = meta.updated ? Date.parse(meta.updated) : 0;
+      const localUpdated = local.updatedAt ?? 0;
+      const concurrent = Math.abs(remoteUpdated - localUpdated) < 90_000;
+
+      if (remoteUpdated > localUpdated && !concurrent) {
+        // Remote is clearly newer — take it.
+        await putNote({
+          ...local,
+          title: meta.title || local.title,
+          markdown: body,
+          tags: Array.isArray(meta.tags) ? meta.tags : local.tags,
+          syllabus: Array.isArray(meta.syllabus) ? meta.syllabus : local.syllabus,
+          published: !!meta.published,
+          slug: meta.slug || local.slug,
+          driveModified: file.modifiedTime,
+          syncedHash: remoteHash,
+          updatedAt: remoteUpdated,
+        });
+        bus.emit('note-external-update', nid);
+      } else if (localUpdated > remoteUpdated && !concurrent) {
+        // Local is clearly newer — keep it; push() will upload it.
+        await putNote({ ...local, driveModified: file.modifiedTime });
+      } else {
+        // Genuine concurrent edit — keep both, side by side in the same folder.
+        await putNote({
+          id: uid(),
+          folderId: local.folderId,
+          title: `${meta.title || local.title} (conflicted copy)`,
+          markdown: body,
+          tags: local.tags,
+          syllabus: local.syllabus,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          published: false,
+          order: 999,
+        });
+        await putNote({ ...local, driveModified: file.modifiedTime });
+        toast(`"${local.title}" was edited on two devices at once — kept both copies.`, 'error');
+      }
     }
   }
 }

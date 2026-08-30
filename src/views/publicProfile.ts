@@ -19,7 +19,9 @@ export async function renderPublicProfile(root: HTMLElement, username: string, s
   try {
     if (!profile) {
       const rec: RegistryRecord = await fetchJson(registryUrl(username));
-      profile = await fetchJson<PublicProfile>(rec.profileUrl);
+      // Always fetch a fresh profile.json (it's tiny) so newly published notes show up.
+      const sep = rec.profileUrl.includes('?') ? '&' : '?';
+      profile = await fetchJson<PublicProfile>(rec.profileUrl + sep + '_=' + Date.now());
       cache.set(username, profile);
     }
   } catch (e) {
@@ -159,7 +161,8 @@ async function renderSingleNote(root: HTMLElement, profile: PublicProfile, meta:
   root.append(shell(body));
 
   try {
-    const raw = await (await fetch(meta.url, { credentials: 'omit' })).text();
+    const bust = (meta.url.includes('?') ? '&' : '?') + '_=' + Date.now();
+    const raw = await (await fetch(meta.url + bust, { credentials: 'omit', cache: 'no-store' })).text();
     const { body: md } = parseMarkdownFile(raw);
     const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
     article.innerHTML = `<h1 class="doc-title">${esc(meta.title)}</h1>` + render(md);

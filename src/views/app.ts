@@ -50,12 +50,21 @@ export class WorkspaceView {
     bus.on('auth', () => this.renderAccountButton());
     bus.on('sync-state', (s: any) => this.renderSyncState(s));
     bus.on('note-external-update', (id: string) => {
-      if (this.current?.id === id) this.openNote(id);
+      // Reload the open note with the remote version — but not while the user is mid-edit
+      // (their unsaved text would jump). flushSave + the LWW merge handles that case.
+      if (this.current?.id === id && this.dirtyDoc == null && !this.editorFocused) this.openNote(id);
     });
     bus.on('open-note', (id: string) => this.openNote(id));
     bus.on('close-modals', () => document.querySelectorAll('.modal-overlay,.palette-overlay').forEach((n) => n.remove()));
 
     document.addEventListener('keydown', (e) => this.onKey(e), true);
+
+    // Never lose keystrokes: persist immediately when focus/visibility changes or the tab unloads.
+    const flush = () => void this.flushSave();
+    document.addEventListener('visibilitychange', flush);
+    window.addEventListener('blur', flush);
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('beforeunload', flush);
 
     await this.renderTree();
     this.renderAccountButton();
@@ -334,6 +343,7 @@ export class WorkspaceView {
   /* ---------------- note lifecycle ---------------- */
 
   async openNote(id: string) {
+    await this.flushSave(); // persist the note we're leaving
     const note = id ? await getNote(id) : undefined;
     if (!note) {
       this.current = null;
@@ -379,22 +389,29 @@ export class WorkspaceView {
     this.renderTree();
   }
 
-  private onDocChange = (() => {
-    const persist = debounce(async (doc: string) => {
-      if (!this.current) return;
-      const saved = await saveNote(this.current.id, { markdown: doc });
-      if (saved) this.current = saved;
-      (this.els.saved as HTMLElement).textContent = 'saved ' + new Date().toLocaleTimeString();
-    }, 600);
-    return (doc: string) => {
-      if (!this.current) return;
-      this.current.markdown = doc;
-      this.preview.update(doc);
-      this.updateStats();
-      this.renderOutline();
-      persist(doc);
-    };
-  })();
+  private dirtyDoc: string | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private async flushSave(): Promise<void> {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+    if (this.dirtyDoc == null || !this.current) return;
+    const doc = this.dirtyDoc;
+    this.dirtyDoc = null;
+    const saved = await saveNote(this.current.id, { markdown: doc });
+    if (saved) this.current = saved;
+    (this.els.saved as HTMLElement).textContent = 'saved ' + new Date().toLocaleTimeString();
+  }
+
+  private onDocChange = (doc: string) => {
+    if (!this.current) return;
+    this.current.markdown = doc;
+    this.dirtyDoc = doc;
+    this.preview.update(doc);
+    this.updateStats();
+    this.renderOutline();
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => void this.flushSave(), 500);
+  };
 
   private onTitleInput = (() => {
     const persist = debounce(async (title: string) => {
