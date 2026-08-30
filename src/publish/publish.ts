@@ -1,18 +1,21 @@
 import { apiUrl, config } from '../config';
 import { getDriveToken, getUser, updateStoredUser } from '../auth/google';
-import { allNotes, getNote, metaGet, metaSet } from '../store/db';
+import { getNote, metaGet, metaSet } from '../store/db';
 import type { Note } from '../store/models';
 import { ensureSlug, saveNote } from '../store/workspace';
 import { bus, toast } from '../util/misc';
 import {
   createFile,
+  downloadFile,
   ensureRootFolder,
   findAppFile,
+  listFiles,
   makePrivate,
   makePublic,
   publicContentUrl,
   updateFile,
 } from '../sync/drive';
+import { parseMarkdownFile } from '../sync/frontmatter';
 import { syncNow } from '../sync/sync';
 
 export interface PublicProfile {
@@ -121,7 +124,7 @@ function emptyProfile(): PublicProfile {
     displayName: u?.displayName ?? u?.name ?? '',
     bio: u?.bio ?? '',
     avatar: u?.picture ?? '',
-    updatedAt: Date.now(),
+    updatedAt: 0, // set to max(note.updatedAt) in buildProfile so identical sets hash equal
     notes: [],
   };
 }
@@ -131,36 +134,69 @@ function words(md: string): number {
   return m ? m.length : 0;
 }
 
+/**
+ * Build the public index from **Drive**, not this browser's IndexedDB — so it always
+ * reflects every device's published notes. Two browsers publishing independently no longer
+ * overwrite each other's entries.
+ */
 export async function buildProfile(): Promise<PublicProfile> {
-  const notes = (await allNotes()).filter((n) => n.published && n.slug && n.driveFileId);
   const p = emptyProfile();
-  p.notes = notes
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((n) => ({
-      slug: n.slug!,
-      title: n.title,
-      tags: n.tags,
-      syllabus: n.syllabus,
-      updatedAt: n.updatedAt,
-      url: publicContentUrl(n.driveFileId!),
-      words: words(n.markdown),
-    }));
+  await getDriveToken(true);
+  const rootId = await driveRoot();
+  const files = await listFiles(rootId);
+  const published = files.filter((f) => f.appProperties?.published === 'true' && f.appProperties?.slug);
+
+  for (const f of published) {
+    let meta: Record<string, any> = {};
+    let body = '';
+    try {
+      ({ meta, body } = parseMarkdownFile(await downloadFile(f.id)));
+    } catch {
+      /* skip unreadable file */
+      continue;
+    }
+    // Make sure the note file itself is link-shareable for the public page.
+    await makePublic(f.id).catch(() => {});
+    p.notes.push({
+      slug: f.appProperties!.slug,
+      title: meta.title || f.name.replace(/\.md$/, ''),
+      tags: Array.isArray(meta.tags) ? meta.tags : [],
+      syllabus: Array.isArray(meta.syllabus) ? meta.syllabus : [],
+      updatedAt: meta.updated ? Date.parse(meta.updated) : Date.parse(f.modifiedTime),
+      url: publicContentUrl(f.id),
+      words: words(body),
+    });
+  }
+  p.notes.sort((a, b) => b.updatedAt - a.updatedAt);
+  p.updatedAt = p.notes.reduce((m, n) => Math.max(m, n.updatedAt), 0);
   return p;
 }
 
 let uploadT: ReturnType<typeof setTimeout> | null = null;
 export function rebuildAndUploadProfileSoon() {
   if (uploadT) clearTimeout(uploadT);
-  uploadT = setTimeout(() => void rebuildAndUploadProfile(), 3000);
+  uploadT = setTimeout(() => void rebuildAndUploadProfile(), 15_000);
 }
 
-export async function rebuildAndUploadProfile(): Promise<void> {
+let rebuilding: Promise<void> | null = null;
+export function rebuildAndUploadProfile(): Promise<void> {
+  if (rebuilding) return rebuilding;
+  rebuilding = doRebuild().finally(() => {
+    rebuilding = null;
+  });
+  return rebuilding;
+}
+
+async function doRebuild(): Promise<void> {
   const user = getUser();
   if (!user?.username) return;
   try {
     const fileId = await ensureProfileFile();
     const profile = await buildProfile();
-    await updateFile(fileId, JSON.stringify(profile, null, 2));
+    const json = JSON.stringify(profile, null, 2);
+    if (json === (await metaGet<string>('lastProfileJson', ''))) return; // nothing changed
+    await updateFile(fileId, json);
+    await metaSet('lastProfileJson', json);
     await metaSet('profilePublishedAt', Date.now());
     bus.emit('profile-updated', profile);
   } catch (e) {
@@ -214,13 +250,18 @@ export async function pullIdentity(force = false): Promise<void> {
     const res = await fetch(apiUrl('/me'), { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) return;
     const data = (await res.json()) as { username?: string | null; profileFileId?: string | null; profileUrl?: string | null };
-    if (data.username && data.username !== user.username) {
-      await updateStoredUser({
-        username: data.username,
-        profileFileId: data.profileFileId ?? undefined,
-        profileFileUrl: data.profileUrl ?? undefined,
-      });
-      if (data.profileFileId) await metaSet('profileFileId', data.profileFileId);
+    if (!data.username) return;
+
+    const patch: Record<string, string> = {};
+    if (data.username !== user.username) patch.username = data.username;
+    if (data.profileFileId && data.profileFileId !== user.profileFileId) patch.profileFileId = data.profileFileId;
+    if (data.profileUrl && data.profileUrl !== user.profileFileUrl) patch.profileFileUrl = data.profileUrl;
+
+    if (Object.keys(patch).length) {
+      await updateStoredUser(patch);
+      if (patch.profileFileId) await metaSet('profileFileId', patch.profileFileId);
+      // A new browser just learned it owns a page — publish its current published set.
+      if (patch.username) rebuildAndUploadProfileSoon();
     }
   } catch {
     /* offline / not connected — try again next time */
