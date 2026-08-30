@@ -71,13 +71,24 @@ function fill(body: HTMLElement, close: () => void): void {
     driveRow.append(
       h('button', {
         class: 'btn btn-primary',
-        onclick: async () => {
-          try {
-            await getDriveToken(false);
-            toast('Google Drive connected — syncing.', 'success');
-          } catch (e) {
-            toast('Could not connect Drive: ' + (e as Error).message, 'error');
-          }
+        onclick: (e: Event) => {
+          const btn = e.currentTarget as HTMLButtonElement;
+          btn.disabled = true;
+          btn.textContent = 'Opening Google…';
+          // Fire the token request synchronously so Firefox allows the popup.
+          getDriveToken(false)
+            .then(() => toast('Google Drive connected — syncing.', 'success'))
+            .catch((err: Error) => {
+              btn.disabled = false;
+              btn.textContent = 'Connect Google Drive';
+              const m = err.message;
+              toast(
+                m === 'popup-closed' ? 'Drive window was closed before finishing.'
+                : m === 'timeout' ? 'Google did not respond — try again.'
+                : 'Could not connect Drive: ' + m,
+                'error',
+              );
+            });
         },
       }, ['Connect Google Drive']),
     );

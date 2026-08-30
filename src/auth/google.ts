@@ -20,8 +20,26 @@ let tokenState: TokenState | null = null;
 let tokenClient: any = null;
 let currentUser: UserProfile | null = null;
 
-// One in-flight token request at a time; concurrent callers share it.
-let pending: { promise: Promise<string>; resolve: (t: string) => void; reject: (e: Error) => void } | null = null;
+// One in-flight token request at a time; concurrent callers share it. A stuck *silent*
+// request (Firefox blocks the hidden iframe under Total Cookie Protection) must never
+// block a later *interactive* request, so we track which kind is pending and time it out.
+interface Pending {
+  promise: Promise<string>;
+  resolve: (t: string) => void;
+  reject: (e: Error) => void;
+  silent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+}
+let pending: Pending | null = null;
+
+function settlePending(kind: 'resolve' | 'reject', value: string | Error) {
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  const p = pending;
+  pending = null;
+  if (kind === 'resolve') p.resolve(value as string);
+  else p.reject(value as Error);
+}
 
 export const getUser = () => currentUser;
 export const isSignedIn = () => !!currentUser;
@@ -37,9 +55,9 @@ function decodeJwt(jwt: string): any {
   return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
 }
 
-async function waitForGis(timeoutMs = 8000): Promise<void> {
+async function waitForGis(timeoutMs = 10000): Promise<void> {
   const start = Date.now();
-  while (!window.google?.accounts?.id) {
+  while (!window.google?.accounts?.id || !window.google?.accounts?.oauth2) {
     if (Date.now() - start > timeoutMs) throw new Error('Google sign-in failed to load (offline?)');
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -66,26 +84,26 @@ export async function initAuth(): Promise<void> {
   tokenClient = window.google.accounts.oauth2.initTokenClient({
     client_id: config.GOOGLE_CLIENT_ID,
     scope: config.DRIVE_SCOPE,
-    prompt: '',
     callback: (resp: any) => {
       if (resp.error) {
-        const err = new Error(resp.error === 'interaction_required' ? 'needs-consent' : resp.error);
         bus.emit('drive-token-error', resp);
-        pending?.reject(err);
-        pending = null;
+        settlePending('reject', new Error(resp.error === 'interaction_required' ? 'needs-consent' : resp.error));
         return;
       }
       tokenState = {
         access_token: resp.access_token,
         expires_at: Date.now() + (Number(resp.expires_in ?? 3600) - 120) * 1000,
       };
-      metaSet('driveGranted', true);
+      void metaSet('driveGranted', true);
+      settlePending('resolve', resp.access_token);
       bus.emit('drive-connected');
-      pending?.resolve(resp.access_token);
-      pending = null;
+    },
+    error_callback: (err: any) => {
+      // Popup closed/blocked, or silent request could not complete.
+      bus.emit('drive-token-error', err);
+      settlePending('reject', new Error(err?.type === 'popup_closed' ? 'popup-closed' : err?.type || 'drive-auth-failed'));
     },
   });
-
 }
 
 /**
@@ -145,7 +163,7 @@ export async function signOut(): Promise<void> {
   idToken = null;
   tokenState = null;
   currentUser = null;
-  pending = null;
+  if (pending) settlePending('reject', new Error('signed-out'));
   await metaSet('user', null);
   await metaSet('driveGranted', false);
   bus.emit('auth', null);
@@ -153,12 +171,18 @@ export async function signOut(): Promise<void> {
 
 /**
  * Resolve a valid Drive access token.
- * @param silent  true = never show UI (throws if consent is required)
+ * @param silent  true = never show UI (rejects if user interaction is required)
  */
 export function getDriveToken(silent = false): Promise<string> {
   if (tokenState && tokenState.expires_at > Date.now()) return Promise.resolve(tokenState.access_token);
   if (!tokenClient) return Promise.reject(new Error('Auth not initialised'));
-  if (pending) return pending.promise;
+
+  if (pending) {
+    // Share the in-flight request if it's interactive (covers everything) or the same kind.
+    if (!pending.silent || pending.silent === silent) return pending.promise;
+    // We need interactive but a (possibly stuck) silent request is in flight — supersede it.
+    settlePending('reject', new Error('superseded'));
+  }
 
   let resolve!: (t: string) => void;
   let reject!: (e: Error) => void;
@@ -166,12 +190,16 @@ export function getDriveToken(silent = false): Promise<string> {
     resolve = res;
     reject = rej;
   });
-  pending = { promise, resolve, reject };
+  // Silent requests can hang forever in Firefox; give them a short deadline.
+  const timer = setTimeout(
+    () => settlePending('reject', new Error(silent ? 'needs-consent' : 'timeout')),
+    silent ? 6000 : 150_000,
+  );
+  pending = { promise, resolve, reject, silent, timer };
   try {
     tokenClient.requestAccessToken({ prompt: silent ? 'none' : '' });
   } catch (e) {
-    pending = null;
-    return Promise.reject(e as Error);
+    settlePending('reject', e as Error);
   }
   return promise;
 }
