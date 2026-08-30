@@ -135,7 +135,7 @@ export class WorkspaceView {
       h('footer', { class: 'sidebar-foot' }, [
         h('a', { href: '/about', class: 'muted', onclick: (e: Event) => { e.preventDefault(); bus.emit('navigate', '/about'); } }, ['About']),
         h('span', { class: 'muted' }, [' · ']),
-        h('a', { href: '/privacy', class: 'muted', onclick: (e: Event) => { e.preventDefault(); bus.emit('navigate', '/privacy'); } }, ['Privacy']),
+        h('a', { href: '/privacy', class: 'muted' }, ['Privacy']),
       ]),
     ]);
   }

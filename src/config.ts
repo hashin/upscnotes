@@ -15,7 +15,7 @@ export const config = {
    * Drive API and to HTTP referrers upscnotes.hashin.me / localhost. Used only to read
    * public, anyone-with-link note files when rendering someone's public profile.
    */
-  GOOGLE_API_KEY: '' as string,
+  GOOGLE_API_KEY: 'AIzaSyCYsOL-qmCHxSCGBmI86huHJ5sorQqMJqk' as string,
 
   /**
    * Base URL of the registry API (Cloudflare Worker). The static site is on GitHub Pages,

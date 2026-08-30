@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy · UPSC Notes</title>
+  <meta name="description" content="How UPSC Notes handles your data: notes stay in your browser and your own Google Drive; no server stores them." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 5rem;
+      font: 17px/1.7 "Newsreader", Georgia, serif; color: #262019; background: #faf8f4;
+    }
+    @media (prefers-color-scheme: dark) { body { color: #e9e2d6; background: #12100e; } a { color: #8fd0b4; } }
+    a { color: #1c5c46; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2.5rem; font-family: "Inter", system-ui, sans-serif; }
+    .mark { font-weight: 600; color: #0b3d2e; text-decoration: none; }
+    @media (prefers-color-scheme: dark) { .mark { color: #8fd0b4; } }
+    h1 { font-size: 2rem; margin: 0 0 .3rem; }
+    .lede { font-size: 1.15rem; opacity: .8; }
+    h2 { font-size: 1.2rem; margin: 2rem 0 .5rem; }
+    code { font-family: ui-monospace, Menlo, monospace; font-size: .88em; background: rgba(128,128,128,.15); padding: .1em .35em; border-radius: 4px; }
+    footer { margin-top: 3rem; font-family: "Inter", system-ui, sans-serif; font-size: .85rem; opacity: .65; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="mark">UPSC Notes</a>
+    <a href="/">Open the app →</a>
+  </header>
+
+  <h1>Privacy</h1>
+  <p class="lede">Short version: your notes live in your browser and in your own Google
+  Drive. This app has no server that stores them.</p>
+
+  <h2>What stays on your device</h2>
+  <p>Every note you write is saved in this browser (IndexedDB). If you never sign in,
+  nothing you write ever leaves your device.</p>
+
+  <h2>Google sign-in</h2>
+  <p>Signing in with Google gives the app your name, email address and profile picture,
+  used only to label your workspace and your public page. We never receive your Google
+  password.</p>
+
+  <h2>Google Drive</h2>
+  <p>The app uses the <code>drive.file</code> scope, which lets it see and manage
+  <em>only the files it creates</em> — a folder called <code>UPSC&nbsp;Notes</code>
+  containing your notes as Markdown files. It cannot read anything else in your Drive.
+  Notes are written straight from your browser to your Drive and do not pass through any
+  server run by this project. Revoke access any time at
+  <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>.</p>
+
+  <h2>Publishing</h2>
+  <p>If you choose a username and mark a note “Public”, that note file (and any images in
+  it) is set to “anyone with the link can view” in your Drive, and a small record — your
+  username, display name, bio, and a link to your public notes list — is stored so that
+  <code>upscnotes.hashin.me/your-name</code> can find them. Unpublish to reverse it.
+  Nothing is published unless you turn it on.</p>
+
+  <h2>What we don’t do</h2>
+  <p>No analytics or tracking cookies. No selling or sharing of data. No note content on
+  our infrastructure.</p>
+
+  <h2>Contact</h2>
+  <p><a href="mailto:hashjith@gmail.com">hashjith@gmail.com</a></p>
+
+  <footer>
+    UPSC Notes is open source —
+    <a href="https://github.com/hashin/upscnotes" target="_blank" rel="noopener">github.com/hashin/upscnotes</a>.
+    Last updated August 2026.
+  </footer>
+</body>
+</html>
