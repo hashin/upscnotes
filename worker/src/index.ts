@@ -2,10 +2,10 @@
  * Cloudflare Worker — the ONLY server-side code in this project.
  *
  * The app is hosted as a static site on GitHub Pages; this Worker is deployed separately
- * (e.g. upscnotes-api.<account>.workers.dev) and does two things and nothing else:
+ * (e.g. upscnotes-api.<account>.workers.dev) and does only:
  *   1. verify a Google ID token
- *   2. keep the `username -> public profile pointer` registry unique (D1) and publish a
- *      static, edge-cacheable pointer object (R2)
+ *   2. keep the `username -> profile pointer` registry unique (D1), and serve public
+ *      username -> profile lookups (`GET /u/<name>`, edge-cached via the Cache API)
  *
  * Notes never pass through here — they live in each student's Google Drive and are read by
  * the browser directly from Google's CDN.
@@ -20,7 +20,7 @@ const USERNAME_RE = /^[a-z0-9][a-z0-9-]{2,29}$/;
 const RESERVED = new Set([
   'api', 'app', 'about', 'admin', 'assets', 'auth', 'blog', 'docs', 'help', 'login', 'logout',
   'me', 'new', 'note', 'notes', 'privacy', 'profile', 'public', 'registry', 'settings', 'signin',
-  'signup', 'static', 'support', 'terms', 'u', 'user', 'users', 'www', 'hashin',
+  'signup', 'static', 'support', 'terms', 'u', 'user', 'users', 'www',
 ]);
 
 const CORS = {
@@ -43,11 +43,11 @@ export default {
     const path = url.pathname.replace(/^\/api/, '').replace(/\/$/, '') || '/';
     try {
       if (request.method === 'GET' && path === '/') return json({ ok: true, service: 'upscnotes-api' });
-      if (request.method === 'GET' && path === '/check') return check(env, url);
-      if (request.method === 'GET' && path.startsWith('/u/')) return resolveProfile(env, ctx, request, decodeURIComponent(path.slice(3)));
-      if (request.method === 'POST' && path === '/claim') return claim(request, env);
-      if (request.method === 'POST' && path === '/profile') return updateProfile(request, env);
-      if (request.method === 'DELETE' && path === '/account') return deleteAccount(request, env);
+      if (request.method === 'GET' && path === '/check') return await check(env, url);
+      if (request.method === 'GET' && path.startsWith('/u/')) return await resolveProfile(env, ctx, request, decodeURIComponent(path.slice(3)));
+      if (request.method === 'POST' && path === '/claim') return await claim(request, env);
+      if (request.method === 'POST' && path === '/profile') return await updateProfile(request, env);
+      if (request.method === 'DELETE' && path === '/account') return await deleteAccount(request, env);
       return json({ error: 'not found' }, 404);
     } catch (e) {
       if (e instanceof Response) return e;
@@ -197,9 +197,15 @@ async function verifyGoogleToken(request: Request, clientId: string): Promise<Go
   if (!token) throw unauthorized('missing token');
 
   const [h, p, s] = token.split('.');
-  if (!h || !p || !s) throw unauthorized();
-  const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(h)));
-  const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p))) as GoogleClaims;
+  if (!h || !p || !s) throw unauthorized('malformed token');
+  let header: { kid?: string };
+  let payload: GoogleClaims;
+  try {
+    header = JSON.parse(new TextDecoder().decode(b64urlToBytes(h)));
+    payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p))) as GoogleClaims;
+  } catch {
+    throw unauthorized('malformed token');
+  }
 
   if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') throw unauthorized('bad issuer');
   if (payload.aud !== clientId) throw unauthorized('bad audience');

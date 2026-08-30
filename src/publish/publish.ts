@@ -36,7 +36,7 @@ const USERNAME_RE = /^[a-z0-9][a-z0-9-]{2,29}$/;
 const RESERVED = new Set([
   'api', 'app', 'about', 'admin', 'assets', 'auth', 'blog', 'docs', 'help', 'login', 'logout',
   'me', 'new', 'note', 'notes', 'privacy', 'profile', 'public', 'registry', 'settings', 'signin',
-  'signup', 'static', 'support', 'terms', 'u', 'user', 'users', 'www', 'hashin',
+  'signup', 'static', 'support', 'terms', 'u', 'user', 'users', 'www',
 ]);
 
 export function validateUsername(name: string): string | null {
@@ -48,7 +48,7 @@ export function validateUsername(name: string): string | null {
 export async function checkUsername(name: string): Promise<{ available: boolean; reason?: string }> {
   const err = validateUsername(name);
   if (err) return { available: false, reason: err };
-  const res = await fetch(apiUrl(`/api/check?username=${encodeURIComponent(name)}`));
+  const res = await fetch(apiUrl(`/check?username=${encodeURIComponent(name)}`));
   if (!res.ok) return { available: false, reason: 'Could not reach the name server.' };
   return res.json();
 }
@@ -63,7 +63,7 @@ export async function claimUsername(name: string): Promise<void> {
   const profileFileId = await ensureProfileFile();
   const profileUrl = publicContentUrl(profileFileId);
 
-  const res = await fetch(apiUrl('/api/claim'), {
+  const res = await fetch(apiUrl('/claim'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
     body: JSON.stringify({ username: name, profileFileId, profileUrl }),

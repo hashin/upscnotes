@@ -24,7 +24,7 @@ export const config = {
    * lookups (`GET /u/<name>`, edge-cached). Leave empty until the Worker exists — sign-in and
    * publishing stay disabled and the rest of the app works.
    */
-  API_BASE: '' as string,
+  API_BASE: 'https://upscnotes-api.sneha4luvn.workers.dev' as string,
 
   /** Canonical site URL, used for share links and SEO tags. */
   SITE_URL: 'https://upscnotes.hashin.me' as string,
