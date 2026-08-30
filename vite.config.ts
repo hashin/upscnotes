@@ -51,26 +51,20 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // New SW takes over the page immediately, so a deployed build's chunk hashes and
-        // the cached index.html can't drift apart (the "Failed to fetch dynamically
-        // imported module" error).
+        // The new SW takes over immediately and the whole precache swaps atomically, so a
+        // build's index.html and EVERY chunk it can import move together — no "Failed to
+        // fetch dynamically imported module" after a deploy. Precaching everything also
+        // means the app is genuinely 100% offline. Repeat-deploy cost is only the changed
+        // (small) app chunks — workbox revalidates by content hash.
         skipWaiting: true,
         clientsClaim: true,
         cleanupOutdatedCaches: true,
-        // Precache the shell + editor only. Heavy on-demand chunks (mermaid, katex,
-        // highlight.js, jszip, cytoscape) are runtime-cached the first time they load.
-        globPatterns: ['**/*.{css,html,svg,png,woff2}', 'assets/index-*.js', 'assets/codemirror-*.js', 'assets/markdown-*.js'],
-        globIgnores: ['**/mermaid-*.js', '**/katex-*.js', '**/hljs-*.js', '**/*Diagram-*.js', '**/cytoscape*.js', '**/cynefin*.js', '**/sql-*.js'],
-        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        globPatterns: ['**/*.{css,html,svg,png,woff2,js}'],
+        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: '/index.html',
         // Public profile pages (/username) are SPA routes — let the shell handle them.
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
-          {
-            urlPattern: /\/assets\/.*\.(js|css)$/,
-            handler: 'StaleWhileRevalidate',
-            options: { cacheName: 'app-chunks', expiration: { maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 60 } },
-          },
           {
             urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
             handler: 'CacheFirst',

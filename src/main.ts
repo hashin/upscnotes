@@ -17,18 +17,33 @@ const RESERVED_FIRST_SEGMENT = new Set([
 
 const app = document.getElementById('app')!;
 
-// A dynamic-import failure almost always means a new deploy replaced the chunk this page
-// still references. Reload once to pick up the new build (StaleWhileRevalidate SW + this).
-let reloadedForChunk = false;
-window.addEventListener('vite:preloadError', (e) => {
+// A dynamic-import failure means a new deploy replaced the chunk this page still references
+// (a stale service worker or CDN edge). Drop every cache + the SW and reload — once.
+let recovering = false;
+window.addEventListener('vite:preloadError', async (e) => {
   e.preventDefault();
-  if (!reloadedForChunk && !sessionStorage.getItem('chunk-reloaded')) {
-    reloadedForChunk = true;
-    sessionStorage.setItem('chunk-reloaded', '1');
-    location.reload();
+  if (recovering || sessionStorage.getItem('chunk-recovered')) {
+    app.innerHTML =
+      '<div style="padding:2rem;font-family:system-ui;max-width:32rem;margin:2rem auto">' +
+      '<h2>Please refresh</h2><p>A new version was just deployed. Reload the page (or close and reopen the tab) to get it.</p>' +
+      '<button onclick="location.reload()" style="padding:.5rem 1rem">Reload</button></div>';
+    return;
   }
+  recovering = true;
+  sessionStorage.setItem('chunk-recovered', '1');
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch { /* ignore */ }
+  location.reload();
 });
-window.addEventListener('load', () => setTimeout(() => sessionStorage.removeItem('chunk-reloaded'), 5000));
+window.addEventListener('load', () => setTimeout(() => sessionStorage.removeItem('chunk-recovered'), 8000));
 
 async function boot() {
   reflect();
