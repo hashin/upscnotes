@@ -240,6 +240,7 @@ export async function updateProfileMeta(patch: { displayName?: string; bio?: str
  * username registry lives in D1 keyed by the Google account, not in this browser.
  */
 let lastIdentityPull = 0;
+let healedThisSession = false;
 export async function pullIdentity(force = false): Promise<void> {
   const user = getUser();
   if (!user) return;
@@ -256,12 +257,16 @@ export async function pullIdentity(force = false): Promise<void> {
     if (data.username !== user.username) patch.username = data.username;
     if (data.profileFileId && data.profileFileId !== user.profileFileId) patch.profileFileId = data.profileFileId;
     if (data.profileUrl && data.profileUrl !== user.profileFileUrl) patch.profileFileUrl = data.profileUrl;
-
     if (Object.keys(patch).length) {
       await updateStoredUser(patch);
       if (patch.profileFileId) await metaSet('profileFileId', patch.profileFileId);
-      // A new browser just learned it owns a page — publish its current published set.
-      if (patch.username) rebuildAndUploadProfileSoon();
+    }
+
+    // Once per session, rebuild the public index from Drive so it reflects every device's
+    // published notes (heals a profile.json a stale build left incomplete).
+    if (!healedThisSession) {
+      healedThisSession = true;
+      setTimeout(() => void rebuildAndUploadProfile(), 20_000); // after the first sync settles
     }
   } catch {
     /* offline / not connected — try again next time */
