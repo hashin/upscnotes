@@ -8,7 +8,7 @@
 
 export const config = {
   /** OAuth 2.0 Web client ID from Google Cloud Console. Ends in `.apps.googleusercontent.com`. */
-  GOOGLE_CLIENT_ID: '' as string,
+  GOOGLE_CLIENT_ID: '157486155350-8qsefn3gudhk8f5co0hbmki6243b86nq.apps.googleusercontent.com' as string,
 
   /**
    * Browser API key (Google Cloud Console -> Credentials -> API key), restricted to the

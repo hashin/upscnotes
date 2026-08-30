@@ -11,8 +11,7 @@ binding = "DB"
 database_name = "upscnotes"
 database_id = "eff788d9-d423-464c-9a14-7817b0181b05"
 
-# GOOGLE_CLIENT_ID (the OAuth Web client id — public, not a secret) is read from env.
-# Set it with:  npx wrangler secret put GOOGLE_CLIENT_ID
-# or uncomment and inline it here:
-# [vars]
-# GOOGLE_CLIENT_ID = "xxxx.apps.googleusercontent.com"
+# GOOGLE_CLIENT_ID is the OAuth Web client id — public (it ships in the frontend bundle),
+# not a secret — so it lives here in plain [vars].
+[vars]
+GOOGLE_CLIENT_ID = "157486155350-8qsefn3gudhk8f5co0hbmki6243b86nq.apps.googleusercontent.com"
