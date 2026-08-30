@@ -11,8 +11,8 @@ import { startAutoSync } from './sync/sync';
 import { watchPublishing } from './publish/publish';
 
 const RESERVED_FIRST_SEGMENT = new Set([
-  'about', 'api', 'assets', 'icons', 'favicon.svg', 'robots.txt', 'sitemap.xml', 'manifest.webmanifest',
-  'sw.js', 'registrations', 'index.html', 'og.png',
+  'about', 'privacy', 'api', 'assets', 'icons', 'favicon.svg', 'robots.txt', 'sitemap.xml',
+  'manifest.webmanifest', 'sw.js', 'registrations', 'index.html', 'og.png',
 ]);
 
 const app = document.getElementById('app')!;
@@ -45,6 +45,10 @@ async function route() {
   }
   if (segments[0] === 'about') {
     renderAbout();
+    return;
+  }
+  if (segments[0] === 'privacy') {
+    renderPrivacy();
     return;
   }
   if (!RESERVED_FIRST_SEGMENT.has(segments[0])) {
@@ -92,6 +96,59 @@ function renderAbout() {
     <footer class="public-foot muted">UPSC Notes · free &amp; offline-first</footer>
   </div>`;
   document.title = 'About · UPSC Notes';
+}
+
+function renderPrivacy() {
+  app.className = 'public';
+  app.removeAttribute('aria-busy');
+  app.innerHTML = `
+  <div class="public-shell">
+    <header class="public-top">
+      <a href="/" class="brand-mark">UPSC Notes</a>
+      <a href="/" class="btn btn-sm btn-primary">Open the app</a>
+    </header>
+    <main class="about">
+      <h1>Privacy</h1>
+      <p class="lede">Short version: your notes live in your browser and in your own Google
+      Drive. This app has no server that stores them.</p>
+
+      <h2>What stays on your device</h2>
+      <p>Every note you write is saved in this browser (IndexedDB). If you never sign in,
+      nothing you write ever leaves your device.</p>
+
+      <h2>Google sign-in</h2>
+      <p>Signing in with Google gives the app your name, email address and profile picture,
+      used only to label your workspace and your public page. We do not receive your Google
+      password.</p>
+
+      <h2>Google Drive</h2>
+      <p>The app requests the <code>drive.file</code> scope, which lets it see and manage
+      <em>only the files it creates</em> — a folder called <code>UPSC&nbsp;Notes</code>
+      containing your notes as Markdown files. It cannot see anything else in your Drive.
+      Your notes are written directly from your browser to your Drive; they do not pass
+      through any server operated by this project. Revoke access any time at
+      <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>.</p>
+
+      <h2>Publishing</h2>
+      <p>If you choose a username and mark a note “Public”, that note file (and any images
+      in it) is set to “anyone with the link can view” in your Drive, and a small record —
+      your username, display name, bio and a link to your public notes list — is stored so
+      that <code>upscnotes.hashin.me/your-name</code> can find them. Unpublish to reverse
+      this. Nothing is published unless you turn it on.</p>
+
+      <h2>What we don’t do</h2>
+      <p>No analytics or tracking cookies. No selling or sharing of data. No note content on
+      our infrastructure.</p>
+
+      <h2>Contact</h2>
+      <p>Questions: <a href="mailto:hashjith@gmail.com">hashjith@gmail.com</a>.</p>
+
+      <p class="muted" style="margin-top:2rem">This app is open source:
+      <a href="https://github.com/hashin/upscnotes" target="_blank" rel="noopener">github.com/hashin/upscnotes</a>.</p>
+    </main>
+    <footer class="public-foot muted">UPSC Notes · free &amp; offline-first</footer>
+  </div>`;
+  document.title = 'Privacy · UPSC Notes';
 }
 
 boot().catch((e) => {

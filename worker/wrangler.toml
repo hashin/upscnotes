@@ -9,7 +9,7 @@ compatibility_date = "2024-11-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "upscnotes"
-database_id = "PASTE_D1_DATABASE_ID"   # from: npx wrangler d1 create upscnotes
+database_id = "eff788d9-d423-464c-9a14-7817b0181b05"
 
 # GOOGLE_CLIENT_ID (the OAuth Web client id — public, not a secret) is read from env.
 # Set it with:  npx wrangler secret put GOOGLE_CLIENT_ID
