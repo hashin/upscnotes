@@ -129,6 +129,7 @@ export async function setPublished(noteId: string, published: boolean): Promise<
     if (fresh?.driveFileId) await makePrivate(fresh.driveFileId).catch(() => {});
     toast('Unpublished.', 'success');
   }
+  bus.emit('sync-request'); // push the changed front-matter to Drive for other devices
 }
 
 export async function updateProfileMeta(patch: { displayName?: string; bio?: string }): Promise<void> {
@@ -152,23 +153,59 @@ const refreshSoon = debounce(async (noteId: string) => {
   if (n?.published && n.slug && n.driveFileId && getUser()?.username) await pushPublish(n).catch(() => {});
 }, 12_000);
 
-/** Reconcile local published flags with the server's authoritative list on sign-in. */
-export async function reconcilePublished(): Promise<void> {
-  if (!getUser()?.username) return;
+/**
+ * Single reconciliation with the server (one `GET /me`): recover username + profile fields
+ * on a new browser, and align every local `published` flag with the server's authoritative
+ * set (in both directions). Throttled; call with force=true right after a publish toggle.
+ */
+let lastPull = 0;
+let pulling: Promise<void> | null = null;
+export function pullIdentity(force = false): Promise<void> {
+  if (pulling) return pulling;
+  if (!force && Date.now() - lastPull < 20_000) return Promise.resolve();
+  pulling = doPull().finally(() => {
+    pulling = null;
+    lastPull = Date.now();
+  });
+  return pulling;
+}
+
+async function doPull(): Promise<void> {
+  const user = getUser();
+  if (!user) return;
   try {
     const res = await authFetch('/me');
     if (!res.ok) return;
-    const data = (await res.json()) as { published?: { noteId: string; slug: string }[] };
+    const data = (await res.json()) as {
+      username?: string | null;
+      displayName?: string | null;
+      bio?: string | null;
+      published?: { noteId: string; slug: string }[];
+    };
+    if (!data.username) return;
+
+    const patch: Record<string, string> = {};
+    if (data.username !== user.username) patch.username = data.username;
+    if (data.displayName && data.displayName !== user.displayName) patch.displayName = data.displayName;
+    if (data.bio != null && data.bio !== user.bio) patch.bio = data.bio;
+    if (Object.keys(patch).length) await updateStoredUser(patch);
+
     const serverIds = new Set((data.published ?? []).map((p) => p.noteId));
     const { allNotes } = await import('../store/db');
     for (const n of await allNotes()) {
-      if (serverIds.has(n.id) && !n.published) await saveNote(n.id, { published: true });
-      else if (!serverIds.has(n.id) && n.published) await saveNote(n.id, { published: false });
-      // Locally-published notes the server doesn't know yet -> push them up.
-      if (n.published && !serverIds.has(n.id) && n.slug && n.driveFileId) await pushPublish(n).catch(() => {});
+      if (serverIds.has(n.id) && !n.published) {
+        await saveNote(n.id, { published: true });
+      } else if (!serverIds.has(n.id) && n.published) {
+        if (n.slug && n.driveFileId) {
+          // Locally published but the server doesn't know — push it up (don't unpublish).
+          await pushPublish(n).catch(() => {});
+        } else {
+          await saveNote(n.id, { published: false });
+        }
+      }
     }
   } catch {
-    /* offline — retry next connect */
+    /* offline — retry next cycle */
   }
 }
 
@@ -176,31 +213,6 @@ export function watchPublishing(): void {
   bus.on('note-saved', (n: Note) => {
     if (n.published) refreshSoon(n.id);
   });
-  bus.on('drive-connected', () => {
-    void pullIdentity();
-  });
-}
-
-/* ---------------- recover username on a new browser ---------------- */
-
-let lastPull = 0;
-export async function pullIdentity(force = false): Promise<void> {
-  const user = getUser();
-  if (!user) return;
-  if (!force && Date.now() - lastPull < 30_000) return;
-  lastPull = Date.now();
-  try {
-    const res = await authFetch('/me');
-    if (!res.ok) return;
-    const data = (await res.json()) as { username?: string | null; displayName?: string | null; bio?: string | null };
-    if (!data.username) return;
-    const patch: Record<string, string> = {};
-    if (data.username !== user.username) patch.username = data.username;
-    if (data.displayName && data.displayName !== user.displayName) patch.displayName = data.displayName;
-    if (data.bio != null && data.bio !== user.bio) patch.bio = data.bio;
-    if (Object.keys(patch).length) await updateStoredUser(patch);
-    await reconcilePublished();
-  } catch {
-    /* offline */
-  }
+  bus.on('drive-connected', () => void pullIdentity(true));
+  bus.on('sync-done', () => void pullIdentity());
 }
