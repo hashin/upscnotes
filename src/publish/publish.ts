@@ -1,25 +1,14 @@
 import { apiUrl, config } from '../config';
 import { getDriveToken, getUser, updateStoredUser } from '../auth/google';
-import { getNote, metaGet, metaSet } from '../store/db';
+import { getNote } from '../store/db';
 import type { Note } from '../store/models';
 import { ensureSlug, saveNote } from '../store/workspace';
-import { bus, toast } from '../util/misc';
-import {
-  createFile,
-  downloadFile,
-  ensureRootFolder,
-  findAppFile,
-  listFiles,
-  makePrivate,
-  makePublic,
-  publicContentUrl,
-  updateFile,
-} from '../sync/drive';
-import { parseMarkdownFile } from '../sync/frontmatter';
+import { bus, countWords, debounce, toast } from '../util/misc';
+import { makePrivate, makePublic } from '../sync/drive';
 import { syncNow } from '../sync/sync';
 
 export interface PublicProfile {
-  v: 1;
+  v: number;
   username: string;
   displayName: string;
   bio: string;
@@ -31,7 +20,7 @@ export interface PublicProfile {
     tags: string[];
     syllabus: string[];
     updatedAt: number;
-    url: string; // public content URL of the .md
+    url: string;
     words: number;
   }[];
 }
@@ -49,6 +38,14 @@ export function validateUsername(name: string): string | null {
   return null;
 }
 
+async function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const token = await getDriveToken(true).catch(() => getDriveToken(false));
+  return fetch(apiUrl(path), {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}), Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function checkUsername(name: string): Promise<{ available: boolean; reason?: string }> {
   const err = validateUsername(name);
   if (err) return { available: false, reason: err };
@@ -58,151 +55,54 @@ export async function checkUsername(name: string): Promise<{ available: boolean;
 }
 
 export async function claimUsername(name: string): Promise<void> {
-  if (!getUser()) throw new Error('Sign in first.');
   const err = validateUsername(name);
   if (err) throw new Error(err);
-
-  const accessToken = await getDriveToken(false);
-
-  // Make sure the Drive profile file exists and is public before we register the pointer.
-  const profileFileId = await ensureProfileFile();
-  const profileUrl = publicContentUrl(profileFileId);
-
-  const res = await fetch(apiUrl('/claim'), {
+  const user = getUser();
+  const res = await authFetch('/claim', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify({ username: name, profileFileId, profileUrl }),
+    body: JSON.stringify({ username: name, displayName: user?.name ?? '', avatar: user?.picture ?? '' }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `Claim failed (${res.status})`);
-
-  await updateStoredUser({ username: name, profileFileId, profileFileUrl: profileUrl });
-  await metaSet('profileFileId', profileFileId);
+  await updateStoredUser({ username: name });
   toast(`Username @${name} is yours. Your page: ${config.SITE_URL}/${name}`, 'success');
-  await rebuildAndUploadProfile();
+  // Re-publish anything already marked public locally.
+  for (const n of await pendingPublishNotes()) await pushPublish(n).catch(() => {});
 }
 
-async function driveRoot(): Promise<string> {
-  let id = await metaGet<string>('driveRootId', '');
-  if (!id) {
-    id = await ensureRootFolder();
-    await metaSet('driveRootId', id);
-  }
-  return id;
+async function pendingPublishNotes(): Promise<Note[]> {
+  const { allNotes } = await import('../store/db');
+  return (await allNotes()).filter((n) => n.published && n.slug);
 }
 
-async function ensureProfileFile(): Promise<string> {
-  const known = await metaGet<string>('profileFileId', getUser()?.profileFileId ?? '');
-  if (known) return known;
-  await getDriveToken();
+/* ---------------- per-note publish state (authoritative in D1) ---------------- */
 
-  // A profile.json created on another device is visible here (drive.file is per app+user),
-  // so adopt it rather than making a duplicate.
-  const found = await findAppFile('upscnotes-profile', '1');
-  if (found) {
-    const url = await makePublic(found);
-    await metaSet('profileFileId', found);
-    await updateStoredUser({ profileFileId: found, profileFileUrl: url });
-    return found;
-  }
-
-  const root = await driveRoot();
-  const file = await createFile(root, 'profile.json', JSON.stringify(emptyProfile(), null, 2), {
-    'upscnotes-profile': '1',
+async function pushPublish(note: Note): Promise<void> {
+  if (!note.driveFileId || !note.slug) return;
+  const res = await authFetch('/publish', {
+    method: 'POST',
+    body: JSON.stringify({
+      noteId: note.id,
+      slug: note.slug,
+      title: note.title,
+      tags: note.tags,
+      syllabus: note.syllabus,
+      driveFileId: note.driveFileId,
+      words: countWords(note.markdown),
+      updatedAt: note.updatedAt,
+    }),
   });
-  const url = await makePublic(file.id);
-  await metaSet('profileFileId', file.id);
-  await updateStoredUser({ profileFileId: file.id, profileFileUrl: url });
-  return file.id;
-}
-
-function emptyProfile(): PublicProfile {
-  const u = getUser();
-  return {
-    v: 1,
-    username: u?.username ?? '',
-    displayName: u?.displayName ?? u?.name ?? '',
-    bio: u?.bio ?? '',
-    avatar: u?.picture ?? '',
-    updatedAt: 0, // set to max(note.updatedAt) in buildProfile so identical sets hash equal
-    notes: [],
-  };
-}
-
-function words(md: string): number {
-  const m = md.replace(/[#>*_`~\-|[\]()!]/g, ' ').match(/\S+/g);
-  return m ? m.length : 0;
-}
-
-/**
- * Build the public index from **Drive**, not this browser's IndexedDB — so it always
- * reflects every device's published notes. Two browsers publishing independently no longer
- * overwrite each other's entries.
- */
-export async function buildProfile(): Promise<PublicProfile> {
-  const p = emptyProfile();
-  await getDriveToken(true);
-  const rootId = await driveRoot();
-  const files = await listFiles(rootId);
-  const published = files.filter((f) => f.appProperties?.published === 'true' && f.appProperties?.slug);
-
-  for (const f of published) {
-    let meta: Record<string, any> = {};
-    let body = '';
-    try {
-      ({ meta, body } = parseMarkdownFile(await downloadFile(f.id)));
-    } catch {
-      /* skip unreadable file */
-      continue;
+  if (res.status === 409) {
+    const d = await res.json().catch(() => ({}));
+    if (d.error === 'slug-taken') {
+      // pick a fresh slug and retry once
+      const fresh = await ensureSlug({ ...note, slug: undefined });
+      await saveNote(note.id, { slug: fresh });
+      return pushPublish({ ...note, slug: fresh });
     }
-    // Make sure the note file itself is link-shareable for the public page.
-    await makePublic(f.id).catch(() => {});
-    p.notes.push({
-      slug: f.appProperties!.slug,
-      title: meta.title || f.name.replace(/\.md$/, ''),
-      tags: Array.isArray(meta.tags) ? meta.tags : [],
-      syllabus: Array.isArray(meta.syllabus) ? meta.syllabus : [],
-      updatedAt: meta.updated ? Date.parse(meta.updated) : Date.parse(f.modifiedTime),
-      url: publicContentUrl(f.id),
-      words: words(body),
-    });
+    throw new Error(d.error ?? 'conflict');
   }
-  p.notes.sort((a, b) => b.updatedAt - a.updatedAt);
-  p.updatedAt = p.notes.reduce((m, n) => Math.max(m, n.updatedAt), 0);
-  return p;
-}
-
-let uploadT: ReturnType<typeof setTimeout> | null = null;
-export function rebuildAndUploadProfileSoon() {
-  if (uploadT) clearTimeout(uploadT);
-  uploadT = setTimeout(() => void rebuildAndUploadProfile(), 15_000);
-}
-
-let rebuilding: Promise<void> | null = null;
-export function rebuildAndUploadProfile(): Promise<void> {
-  if (rebuilding) return rebuilding;
-  rebuilding = doRebuild().finally(() => {
-    rebuilding = null;
-  });
-  return rebuilding;
-}
-
-async function doRebuild(): Promise<void> {
-  const user = getUser();
-  if (!user?.username) return;
-  try {
-    const fileId = await ensureProfileFile();
-    const profile = await buildProfile();
-    const json = JSON.stringify(profile, null, 2);
-    if (json === (await metaGet<string>('lastProfileJson', ''))) return; // nothing changed
-    await updateFile(fileId, json);
-    await metaSet('lastProfileJson', json);
-    await metaSet('profilePublishedAt', Date.now());
-    bus.emit('profile-updated', profile);
-  } catch (e) {
-    console.error('[profile]', e);
-    toast('Could not update your public page: ' + (e as Error).message, 'error');
-  }
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `publish failed (${res.status})`);
 }
 
 export async function setPublished(noteId: string, published: boolean): Promise<void> {
@@ -215,68 +115,92 @@ export async function setPublished(noteId: string, published: boolean): Promise<
   const slug = published ? await ensureSlug(note) : note.slug;
   await saveNote(noteId, { published, slug });
 
-  // Sync so this note — and anything published from other devices — is on Drive before
-  // we regenerate the public index.
-  await syncNow('publish');
-
+  // Make sure the note file exists on Drive and is / isn't link-shared.
+  if (!note.driveFileId) await syncNow('publish');
   const fresh = await getNote(noteId);
-  if (!fresh?.driveFileId) throw new Error('Could not back this note up to Drive — check your connection and retry.');
+  if (published && !fresh?.driveFileId) throw new Error('Could not back this note up to Drive — check your connection and retry.');
 
-  if (published) await makePublic(fresh.driveFileId);
-  else await makePrivate(fresh.driveFileId).catch(() => {});
-
-  await rebuildAndUploadProfile();
-  toast(published ? `Published → ${config.SITE_URL}/${getUser()!.username}/${slug}` : 'Unpublished.', 'success');
+  if (published) {
+    await makePublic(fresh!.driveFileId!);
+    await pushPublish(fresh!);
+    toast(`Published → ${config.SITE_URL}/${getUser()!.username}/${fresh!.slug}`, 'success');
+  } else {
+    await authFetch(`/publish?noteId=${encodeURIComponent(noteId)}`, { method: 'DELETE' }).catch(() => {});
+    if (fresh?.driveFileId) await makePrivate(fresh.driveFileId).catch(() => {});
+    toast('Unpublished.', 'success');
+  }
 }
 
 export async function updateProfileMeta(patch: { displayName?: string; bio?: string }): Promise<void> {
   await updateStoredUser(patch);
-  await rebuildAndUploadProfile();
+  const user = getUser();
+  const res = await authFetch('/profile', {
+    method: 'POST',
+    body: JSON.stringify({
+      displayName: patch.displayName ?? user?.displayName ?? user?.name ?? '',
+      bio: patch.bio ?? user?.bio ?? '',
+      avatar: user?.picture ?? '',
+    }),
+  });
+  if (!res.ok) toast('Could not save profile: ' + ((await res.json().catch(() => ({}))).error ?? res.status), 'error');
 }
 
-/**
- * Ask the Worker what username this Google account already owns and adopt it locally.
- * This is what makes a second browser / device point at the same public page: the
- * username registry lives in D1 keyed by the Google account, not in this browser.
- */
-let lastIdentityPull = 0;
-let healedThisSession = false;
-export async function pullIdentity(force = false): Promise<void> {
-  const user = getUser();
-  if (!user) return;
-  if (!force && Date.now() - lastIdentityPull < 30_000) return;
-  lastIdentityPull = Date.now();
+/* ---------------- keep D1 metadata fresh as published notes are edited ---------------- */
+
+const refreshSoon = debounce(async (noteId: string) => {
+  const n = await getNote(noteId);
+  if (n?.published && n.slug && n.driveFileId && getUser()?.username) await pushPublish(n).catch(() => {});
+}, 12_000);
+
+/** Reconcile local published flags with the server's authoritative list on sign-in. */
+export async function reconcilePublished(): Promise<void> {
+  if (!getUser()?.username) return;
   try {
-    const token = await getDriveToken(true);
-    const res = await fetch(apiUrl('/me'), { headers: { Authorization: `Bearer ${token}` } });
+    const res = await authFetch('/me');
     if (!res.ok) return;
-    const data = (await res.json()) as { username?: string | null; profileFileId?: string | null; profileUrl?: string | null };
-    if (!data.username) return;
-
-    const patch: Record<string, string> = {};
-    if (data.username !== user.username) patch.username = data.username;
-    if (data.profileFileId && data.profileFileId !== user.profileFileId) patch.profileFileId = data.profileFileId;
-    if (data.profileUrl && data.profileUrl !== user.profileFileUrl) patch.profileFileUrl = data.profileUrl;
-    if (Object.keys(patch).length) {
-      await updateStoredUser(patch);
-      if (patch.profileFileId) await metaSet('profileFileId', patch.profileFileId);
-    }
-
-    // Once per session, rebuild the public index from Drive so it reflects every device's
-    // published notes (heals a profile.json a stale build left incomplete).
-    if (!healedThisSession) {
-      healedThisSession = true;
-      setTimeout(() => void rebuildAndUploadProfile(), 20_000); // after the first sync settles
+    const data = (await res.json()) as { published?: { noteId: string; slug: string }[] };
+    const serverIds = new Set((data.published ?? []).map((p) => p.noteId));
+    const { allNotes } = await import('../store/db');
+    for (const n of await allNotes()) {
+      if (serverIds.has(n.id) && !n.published) await saveNote(n.id, { published: true });
+      else if (!serverIds.has(n.id) && n.published) await saveNote(n.id, { published: false });
+      // Locally-published notes the server doesn't know yet -> push them up.
+      if (n.published && !serverIds.has(n.id) && n.slug && n.driveFileId) await pushPublish(n).catch(() => {});
     }
   } catch {
-    /* offline / not connected — try again next time */
+    /* offline — retry next connect */
   }
 }
 
-/** Wire background profile refresh + identity recovery. */
 export function watchPublishing(): void {
   bus.on('note-saved', (n: Note) => {
-    if (n.published) rebuildAndUploadProfileSoon();
+    if (n.published) refreshSoon(n.id);
   });
-  bus.on('drive-connected', () => void pullIdentity());
+  bus.on('drive-connected', () => {
+    void pullIdentity();
+  });
+}
+
+/* ---------------- recover username on a new browser ---------------- */
+
+let lastPull = 0;
+export async function pullIdentity(force = false): Promise<void> {
+  const user = getUser();
+  if (!user) return;
+  if (!force && Date.now() - lastPull < 30_000) return;
+  lastPull = Date.now();
+  try {
+    const res = await authFetch('/me');
+    if (!res.ok) return;
+    const data = (await res.json()) as { username?: string | null; displayName?: string | null; bio?: string | null };
+    if (!data.username) return;
+    const patch: Record<string, string> = {};
+    if (data.username !== user.username) patch.username = data.username;
+    if (data.displayName && data.displayName !== user.displayName) patch.displayName = data.displayName;
+    if (data.bio != null && data.bio !== user.bio) patch.bio = data.bio;
+    if (Object.keys(patch).length) await updateStoredUser(patch);
+    await reconcilePublished();
+  } catch {
+    /* offline */
+  }
 }

@@ -1,7 +1,7 @@
 import { config } from '../config';
 import { render, renderMermaid } from '../render/markdown';
 import { parseMarkdownFile } from '../sync/frontmatter';
-import { registryUrl, type RegistryRecord } from '../publish/registry';
+import { profileApiUrl } from '../publish/registry';
 import type { PublicProfile } from '../publish/publish';
 import { syllabusLabel } from '../upsc/syllabus';
 import { h, relativeTime } from '../util/misc';
@@ -18,10 +18,7 @@ export async function renderPublicProfile(root: HTMLElement, username: string, s
   let profile = cache.get(username);
   try {
     if (!profile) {
-      const rec: RegistryRecord = await fetchJson(registryUrl(username));
-      // Always fetch a fresh profile.json (it's tiny) so newly published notes show up.
-      const sep = rec.profileUrl.includes('?') ? '&' : '?';
-      profile = await fetchJson<PublicProfile>(rec.profileUrl + sep + '_=' + Date.now());
+      profile = await fetchJson<PublicProfile>(profileApiUrl(username) + '?_=' + Date.now());
       cache.set(username, profile);
     }
   } catch (e) {

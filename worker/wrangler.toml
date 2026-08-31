@@ -15,3 +15,5 @@ database_id = "eff788d9-d423-464c-9a14-7817b0181b05"
 # not a secret — so it lives here in plain [vars].
 [vars]
 GOOGLE_CLIENT_ID = "157486155350-8qsefn3gudhk8f5co0hbmki6243b86nq.apps.googleusercontent.com"
+# Browser API key (public, HTTP-referrer restricted) — used to build note-body URLs.
+GOOGLE_API_KEY = "AIzaSyCYsOL-qmCHxSCGBmI86huHJ5sorQqMJqk"
